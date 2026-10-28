@@ -15,12 +15,34 @@
 
 3. Mở **http://127.0.0.1:4310**. Đăng nhập bằng token in trong terminal. Token được tạo một lần tại `.data/token`, quyền `600`; không gửi token cho người khác.
 4. Chọn **Projects → +**, nhập tên và đường dẫn tuyệt đối tới **Git root đã có ít nhất một commit**. Có thể dùng project bất kỳ, không buộc là source ứng dụng này.
-5. Gửi yêu cầu tới `admin`. Agent được tạo theo nhu cầu; Admin khảo sát, dùng MCP tạo task rồi nhắn agent phụ trách. Chọn role trực tiếp hoặc `@frontend`, `@backend`, `@qa`, `@devops`, `@admin`.
-6. Theo dõi Tasks, Sessions, Git Changes và execution logs. Duyệt shell permission trong OpenCode Desktop/CLI cùng service. Mỗi role hiển thị session ID riêng; cửa sổ không phải danh tính agent.
+5. Project mới tự gửi khảo sát chỉ đọc tới một session Admin thật. Đọc đề xuất tại **Khảo sát và duyệt đội AI**, bổ sung mục tiêu/trả lời câu hỏi, ghi điều kiện ngân sách và chọn số coding session chạy đồng thời. Nhấn **Duyệt phạm vi và đội** mới cho coding chạy. Khảo sát cũng tiêu thụ model usage; ngân sách ghi nhận chưa phải bộ giới hạn tiền tự động.
+6. Sau duyệt, Admin nhận mục tiêu để lập backlog và kích hoạt task. Mỗi role được đề xuất tối đa một session; chưa hỗ trợ nhiều Backend/Frontend cùng role. Session coding tạo theo nhu cầu, không tạo tất cả ngay. Project cũ giữ luồng trước, không tự khảo sát lại.
+7. Theo dõi Tasks, Sessions, Git Changes và execution logs. Duyệt shell permission trong OpenCode Desktop/CLI cùng service. Mỗi role hiển thị session ID riêng; cửa sổ không phải danh tính agent.
 
 SDK `@opencode/client@2.1.4` khớp service đã kiểm tra. Backend dùng `Service.discover()` và `Service.headers()`, không mở port OpenCode hoặc yêu cầu copy password service. CLI trên máy khảo sát nằm tại `/home/hulk/.config/ai.opencode.desktop/cli/2.1.4-x64/opencode-cli`; thêm thư mục đó vào PATH nếu cần. Không sửa source OpenCode.
 
 ## Vận hành
+
+### Service Ubuntu — khuyến nghị
+
+```bash
+bash scripts/service.sh install   # build, tạo user service, bật khi đăng nhập
+bash scripts/service.sh status
+bash scripts/service.sh restart
+bash scripts/service.sh logs
+```
+
+Không chạy `./start.sh` đồng thời service vì cùng port. Service tự restart khi crash; dùng `systemctl --user stop ai-team` để dừng chủ động. Service chạy theo phiên user; chưa bật linger chạy trước đăng nhập. Installer không ghi đè unit có sẵn. Sau cập nhật source: `npm run build` rồi `bash scripts/service.sh restart`.
+
+### Task và review chặt chẽ hơn
+
+- Tasks có nút **Giao agent thực hiện**; MCP `team_execute_task` cho Admin/QA. Task tạo ra chưa tự chạy cho tới thao tác này hoặc thông điệp giao việc. Giới hạn ba lượt; chặn lượt chưa rõ kết quả.
+- Dependency chỉ được dispatch sau khi human xác nhận commit tích hợp, không chỉ dựa trên Done.
+- **Tạo snapshot review** lưu patch + SHA256. File mới phải được stage thủ công trước snapshot; không tự `git add .` và không stage `.opencode/opencode.jsonc` chứa MCP capability.
+- `team_request_review` tự tạo snapshot rồi nhắn QA. QA chạy shell test với `workdir` đúng worktree tác giả, gọi `team_verify_task` với assistant messageID/toolID thật. Backend kiểm tra shell completed, exit 0, thời điểm sau snapshot và digest. Đây là bằng chứng tool execution, không tự chứng minh lệnh test bao phủ đủ mọi tiêu chí.
+- Chỉ QA Done sau verification. Human **Phê duyệt** kiểm tra digest chưa đổi; tải patch đã duyệt để tích hợp thủ công. Không có API tự apply/merge.
+- Sau tích hợp và chạy test tại canonical checkout, nhập commit SHA đầy đủ vào **Xác nhận đã tích hợp thủ công**. Server kiểm tra commit thuộc lịch sử HEAD; nội dung đúng patch vẫn là xác nhận của human, không phải chứng minh tự động.
+- Sau restart, backend đối chiếu active sessions + permission requests, không tự gửi lại message `uncertain`. Nếu session đang chạy từ Desktop/CLI, dispatcher chờ thay vì gửi chồng.
 
 - `./start.sh`: build + start localhost. `npm start`: dùng frontend đã build. `npm run dev`: server qua tsx; frontend build lại bằng `npm run build`.
 - `.env`: `PORT`, `TEAM_DATA_DIR`, `TEAM_TOKEN` tùy chọn. `npm start` không tự nạp `.env`; script `start.sh` có nạp.
@@ -28,7 +50,7 @@ SDK `@opencode/client@2.1.4` khớp service đã kiểm tra. Backend dùng `Serv
 - Restart giữ project/task/message. Tin đang xử lý trở thành `uncertain`; kiểm tra session thật rồi mới Retry, tối đa ba lần. Không tự retry sau mất kết nối vì có thể lặp thao tác code.
 - Pause chỉ dừng dispatch mới. Session đang chạy phải interrupt từ OpenCode nếu cần.
 - Model mỗi role đổi tại Agents sau khi session được tạo; dùng `provider/model`. Có thể dùng cùng model. Quyền session được lưu; sửa quyền/duyệt permission qua OpenCode.
-- QA mới được chuyển Done, phải kèm evidence. Human approval ghi nhận cho tích hợp; **không tự merge**. Git Changes hiển thị diff/status từng worktree. File untracked xuất hiện trong status, chưa có nội dung trong `git diff HEAD`.
+- QA mới được chuyển Done, phải kèm evidence và tool verification. Human approval ghi nhận cho snapshot tích hợp; **không tự merge**. Git Changes hiển thị diff/status từng worktree. File untracked xuất hiện trong status, chưa có nội dung trong `git diff HEAD`.
 - Code ở worktree khác chưa tự xuất hiện trong worktree QA/Frontend. Agent phải cung cấp đường dẫn/diff rõ ràng; human tích hợp sau review. Không tuyên bố task dependency đã tích hợp chỉ vì task Done.
 - `docs/` trong project đích dùng lưu API contract/ADR/context; công cụ inbox còn cung cấp task, project và đường dẫn worktree. Chưa có UI soạn context chuyên biệt.
 

@@ -21,6 +21,19 @@ MCP capability identifies agent server-side. Tool arguments cannot impersonate s
 - No automatic cross-worktree merge. Agent reports diff; QA must inspect originating worktree; human reviews and cherry-picks/merges consciously.
 - No OS sandbox. Shell runs with user authority after OpenCode approval. Untrusted projects require container/VM before use.
 - Backlog quality, review and collaboration depend on model + enabled MCP. No canned responses or synthetic success.
-- Evidence is supplied by QA, not independent proof of every acceptance criterion. Human still reviews.
+- QA verification references real completed shell tool, exit 0, exact author workdir, timestamp after snapshot and SHA256 digest. Still not proof that test command covers every acceptance criterion. Human reviews test quality.
 - Model switch currently available after role session exists. Permissions visible in API; editing handled in OpenCode rather than broad privilege switches in dashboard.
 - No token-price estimates fabricated. Available actual usage remains in execution logs.
+
+## Reliability update
+
+- New projects queue one real Admin read-only survey automatically. Survey Admin denies edit/shell/external directory/subagent; MCP coding dispatch denied until versioned human approval. Project creation writes only orchestration state and agent infrastructure, not source edits.
+- Admin submits structured proposal using `team_submit_proposal`; browser approves explicit goal, budget acknowledgement and concurrency. Budget is not enforced monetary limit; pricing not invented.
+- One session per role maximum. Coding sessions created on demand only for approved roles, bounded concurrency. Legacy projects preserve prior behavior.
+
+- Ubuntu user service, restart on failure; no global daemon or public listener.
+- Health reconciles existing sessions and pending approvals; isolates per-agent failures. Uncertain deliveries remain manual, never silently re-prompt.
+- Explicit task dispatch records message ID and bounded attempts. Dependency execution requires human integration attestation, not QA Done alone.
+- Review snapshots support staged new files, reject unstaged untracked files, exclude managed MCP config. Stale snapshot cannot be approved.
+- Approved patch downloads only. Integration attestation checks commit ancestry; does not apply patch, merge, push or prove patch equivalence.
+- New MCP tools: `team_execute_task`, `team_verify_task`. QA bug creation uses existing create-task + execute-task flow; live multi-cycle QA bug discovery remains unverified.

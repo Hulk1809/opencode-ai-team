@@ -1,0 +1,32 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync,writeFileSync,readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+import { Store } from '../apps/server/src/store.ts';
+import { Team } from '../apps/server/src/team.ts';
+import { prepareReview,approveReview } from '../apps/server/src/review.ts';
+
+test('real Git snapshot rejects untracked changes, missing tool evidence and stale approval; never merges',async()=>{
+  const dir=mkdtempSync('/tmp/opencode/review-');const repo=join(dir,'repo');
+  const git=(...args:string[])=>execFileSync('git',['-C',repo,...args],{encoding:'utf8'});
+  execFileSync('git',['init','-q',repo]);writeFileSync(join(repo,'sum.mjs'),'export const sum=(a,b)=>a-b;\n');
+  git('add','sum.mjs');git('-c','user.name=Test','-c','user.email=test@localhost','commit','-qm','fixture');
+  const original=git('rev-parse','HEAD');
+  const store=new Store(join(dir,'test.sqlite'));const team=new Team(store,dir,4310);
+  const project=store.add('projects',{path:repo,name:'fixture'});
+  store.add('agents',{projectID:project.id,role:'backend',directory:repo});
+  const task=team.task({projectID:project.id,title:'fix sum',criteria:'sum test',assignee:'backend'});
+  writeFileSync(join(repo,'sum.mjs'),'export const sum=(a,b)=>a+b;\n');
+  writeFileSync(join(repo,'new.mjs'),'// untracked\n');
+  await assert.rejects(prepareReview(team,task.id),/stage/);git('add','new.mjs');
+  const snapshot=await prepareReview(team,task.id);assert.match(snapshot.patch,/a\+b/);
+  store.patch('tasks',task.id,{status:'Done',evidence:'claim'});
+  await assert.rejects(approveReview(team,task.id),/tool/);
+  store.patch('tasks',task.id,{verification:{digest:snapshot.digest,exit:0}});
+  assert.equal((await approveReview(team,task.id)).approved,true);
+  writeFileSync(join(repo,'sum.mjs'),'export const sum=(a,b)=>a+b+1;\n');
+  await assert.rejects(approveReview(team,task.id),/thay đổi/);
+  assert.equal(git('rev-parse','HEAD'),original);assert.match(readFileSync(join(repo,'sum.mjs'),'utf8'),/\+1/);
+  store.db.close();
+});

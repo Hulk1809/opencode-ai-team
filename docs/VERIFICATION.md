@@ -1,5 +1,25 @@
 # Kết quả chạy thật
 
+## Project onboarding update
+
+- Added automatic read-only survey queue for new projects, structured proposal MCP, versioned human approval UI/API, approved-role checks and concurrency limit.
+- New `tests/planning.test.ts` uses real Git fixture: no coding agent before approval, stale-version denial, duplicate role/count validation, approved-role enforcement and single approval message.
+- `tests/planning-live.ts` is opt-in real model survey; does not approve coding. Result recorded separately after execution.
+- Live fixture `60db3f43-67fa-48ff-9c89-5bc1575abc2b`: real Admin session `ses_e7ea9b21cffema5glqE3VHlSoG` read README, submitted proposal v1 with findings/risks/questions and role recommendations through MCP. Final state `awaiting_approval`; only Admin session existed, no coding roles created. Initial script timed out after 120 seconds; session completed afterward, final API state verified separately. Increased script timeout to 300 seconds; fresh rerun not yet performed.
+- Final checks: `TEAM_HTTP_TEST=1 npm test` 7 passed, TypeScript + production build passed, production audit 0 vulnerabilities.
+- Earlier `tests/live.ts` and `tests/orchestrator-live.ts` predate onboarding approval requirement; fresh projects now need approval before those direct coding scenarios. Prior successful results describe older behavior, not verification of new onboarding.
+
+## Reliability update — 2026-10-28
+
+- Installed Ubuntu `systemd --user` service locally, status active. Existing foreground dashboard was stopped, shared OpenCode service untouched.
+- Real restart under service: persisted ID verification still 3 projects, 1 task, 46 messages.
+- Controlled crash test: SIGKILL only dashboard service main process; systemd restarted automatically (`NRestarts=1`, new PID), dashboard HTTP 200. Shared OpenCode service not interrupted.
+- `TEAM_HTTP_TEST=1 npm test`: 6 passed, 0 failed at initial update check; includes task dispatch intent/dependency/retry controls and actual Git snapshot stale-approval tests.
+- TypeScript + frontend production build passed with new task action controls.
+- Added CI workflow (not yet pushed or run on GitHub).
+- New QA evidence validation and task API require fresh end-to-end model verification. Old fixture Done evidence predates new verification schema and cannot be newly approved without rerun.
+- Browser automated click-through, fresh multi-turn QA defect cycle, simultaneous CLI/Desktop control and automatic integration remain incomplete. No claim these are done.
+
 ## Đạt
 
 - OpenCode service `2.1.4`, SDK `2.1.4`, discovery + authenticated info + real session creation.

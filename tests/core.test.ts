@@ -19,6 +19,8 @@ test('SQLite persists; dedupe, loop guard, dependency, QA approval and recovery 
   assert.throws(()=>team.updateTask(b.id,{status:'In Progress'},'frontend'),/Dependency/);
   assert.throws(()=>team.updateTask(a.id,{status:'Done',evidence:'trust me'},'backend'),/QA/);
   assert.throws(()=>team.updateTask(a.id,{status:'Done',evidence:''},'qa'),/QA/);
+  assert.throws(()=>team.updateTask(a.id,{status:'Done',evidence:'unverified claim'},'qa'),/team_verify_task/);
+  store.patch('tasks',a.id,{verification:{digest:'fixture',exit:0}});
   team.updateTask(a.id,{status:'Done',evidence:'node --test: 1 passed'},'qa');
   assert.equal(team.updateTask(b.id,{status:'In Progress'},'frontend').status,'In Progress');
   store.patch('messages',first.id,{status:'processing'});store.db.close();
@@ -30,4 +32,23 @@ test('SQLite persists; dedupe, loop guard, dependency, QA approval and recovery 
 test('model refs keep slash inside model ID',()=>{
   assert.deepEqual(modelRef('taile/cx/model'),{providerID:'taile',id:'cx/model'});
   assert.throws(()=>modelRef('invalid'));assert.throws(()=>modelRef('p/'));
+});
+test('task execution queues real dispatch intent once, enforces dependency integration and retry ceiling',()=>{
+  const dir=mkdtempSync('/tmp/opencode/team-task-test-');const store=new Store(join(dir,'test.sqlite'));const team=new Team(store,dir,4310);
+  const p=store.add('projects',{name:'test',path:dir,paused:true});
+  const a=team.task({projectID:p.id,title:'API',assignee:'backend',criteria:'test passes'});
+  const b=team.task({projectID:p.id,title:'UI',assignee:'frontend',criteria:'contract matches',dependencies:[a.id]});
+  assert.throws(()=>team.executeTask(a.id,'frontend'),/Chỉ human/);
+  assert.throws(()=>team.executeTask(b.id,'admin'),/tích hợp/);
+  store.patch('tasks',a.id,{verification:{digest:'fixture',exit:0}});
+  team.updateTask(a.id,{status:'Done',evidence:'node test: exit 0'},'qa');
+  assert.throws(()=>team.executeTask(b.id,'admin'),/tích hợp/);
+  store.patch('tasks',a.id,{integratedAt:new Date().toISOString()});
+  const msg=team.executeTask(b.id,'admin');
+  assert.equal(msg.receiver,'frontend');assert.equal(msg.status,'queued');
+  assert.throws(()=>team.executeTask(b.id,'admin'),/đã có lượt/);
+  store.patch('messages',msg.id,{status:'delivered'});
+  store.patch('tasks',b.id,{executionAttempt:3});
+  assert.throws(()=>team.executeTask(b.id,'admin'),/giới hạn/);
+  store.db.close();
 });

@@ -1,0 +1,33 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync,writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+import { Store } from '../apps/server/src/store.ts';
+import { Team } from '../apps/server/src/team.ts';
+
+test('new project queues read-only survey; coding gated by versioned human approval and allowed roles',async()=>{
+  const dir=mkdtempSync('/tmp/opencode/plan-');const repo=join(dir,'repo');
+  execFileSync('git',['init','-q',repo]);writeFileSync(join(repo,'README.md'),'# fixture\n');
+  execFileSync('git',['-C',repo,'add','README.md']);execFileSync('git',['-C',repo,'-c','user.name=Test','-c','user.email=test@localhost','commit','-qm','fixture']);
+  const store=new Store(join(dir,'test.sqlite'));const team=new Team(store,dir,4310);
+  const project=await team.project({name:'fixture',path:repo});
+  assert.equal(project.onboarding,'surveying');assert.equal(store.all('agents').length,0);
+  assert.equal(store.all('messages')[0].receiver,'admin');
+  const message={projectID:project.id,receiver:'backend',body:'code now',idempotencyKey:'coding'};
+  assert.throws(()=>team.send(message),/Chờ human/);
+  const adminTask=team.task({projectID:project.id,title:'Premature task',assignee:'admin',criteria:'must wait'});
+  assert.throws(()=>team.executeTask(adminTask.id,'admin'),/Chờ human/);
+  const proposal={summary:'Small repo',findings:'README.md exists',risks:'Goal unspecified',questions:['What to build?'],members:[{role:'backend',count:1,model:'',reason:'Build API'},{role:'qa',count:1,model:'',reason:'Verify'}]};
+  assert.throws(()=>team.submitProposal(project.id,proposal,'backend'),/Chỉ Admin/);
+  assert.throws(()=>team.submitProposal(project.id,{...proposal,members:[{...proposal.members[0],count:2}]},'admin'));
+  team.submitProposal(project.id,proposal,'admin');
+  assert.throws(()=>team.approveProject(project.id,{version:2,goal:'API',budgetNote:'review costs',maxParallel:1}),/thay đổi/);
+  assert.throws(()=>team.send(message),/Chờ human/);
+  team.approveProject(project.id,{version:1,goal:'Build API',budgetNote:'Use configured model; human supervises usage',maxParallel:1});
+  assert.equal(team.send(message).status,'queued');
+  assert.throws(()=>team.send({...message,receiver:'frontend',idempotencyKey:'not-approved'}),/Role chưa/);
+  assert.throws(()=>team.approveProject(project.id,{version:1,goal:'Again',budgetNote:'x',maxParallel:1}),/thay đổi/);
+  assert.equal(store.all('messages').filter(m=>m.idempotencyKey.startsWith('approval:')).length,1);
+  store.db.close();
+});

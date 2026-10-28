@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { dependencies, resolveReceiver } from './helpers.ts';
+import { TaskActions } from './TaskActions.tsx';
+import { ProjectPlan } from './ProjectPlan.tsx';
 import { columns, roles } from '../../../packages/shared/src/index.ts';
 
-type Project = { id: string; name: string; path: string; paused: boolean };
+type Project = { id: string; name: string; path: string; paused: boolean; onboarding?:string; proposal?:unknown };
 type Agent = { id: string; projectID: string; role: string; sessionID?: string; directory?: string; model?: string; status: string; error?: string };
 type Task = { id: string; projectID?: string; title: string; status: string; assignee?: string; priority: string; dependencies: string[]; criteria?: string; evidence?: string };
 type Message = { id: string; sender: string; receiver: string; body: string; status: string; createdAt: string; error?: string };
@@ -151,6 +153,7 @@ export default function App() {
       <div className="workspace-footer"><span className="avatar user">U</span><div>Điều phối viên<small>Phiên đăng nhập riêng tư</small></div><button aria-label="Cài đặt" onClick={() => setPage('settings')}>⚙</button></div>
     </aside>
     <main>
+      {!auth&&project?.onboarding&&<ProjectPlan key={project.id} project={project}/>}
       <header className="topbar"><div className="heading"><span className="header-icon">{pages.find(item => item.id === page)?.icon}</span><h1>{pages.find(item => item.id === page)?.title}</h1><span className="header-divider"/><span className="header-description">{project?.name || 'Không gian cộng tác của đội AI'}</span></div><div className="topbar-actions"><span className="live-label"><span className={`status-dot ${events !== 'Trực tiếp' ? 'waiting' : ''}`}/>{events}</span><button className="icon-button" title="Làm mới dữ liệu" aria-label="Làm mới dữ liệu" onClick={() => void refresh()}>↻</button></div></header>
       {error && !auth && <div className="error-banner" role="alert">{error}<button onClick={() => void refresh()}>Thử lại</button></div>}
       {auth ? <div className="auth-wrap"><form className="auth-card" onSubmit={event => { event.preventDefault(); void act(async () => { await api('/login', { token }); setToken(''); setAuth(false); }); }}><div className="eyebrow">KẾT NỐI WORKSPACE</div><h2>Đăng nhập AI Team</h2><p>Dán token từ console máy chủ. Token chỉ dùng đăng nhập; trình duyệt không lưu token.</p><label>Token máy chủ<input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)} required autoFocus /></label>{error && <p className="error-text" role="alert">{error}</p>}<button className="primary" disabled={busy || !token.trim()}>{busy ? 'Đang kết nối…' : 'Kết nối workspace'}</button></form></div> : <>
@@ -175,5 +178,8 @@ function PageTitle({ title, description, action }: { title: string; description:
 }
 
 function TaskCard({ task, busy, update, approve }: { task: Task; busy: boolean; update: (body: { status: string; evidence: string }) => void; approve: () => void }) {
+  return <><TaskActions id={task.id}/><TaskDetails task={task} busy={busy} update={update} approve={approve}/></>;
+}
+function TaskDetails({ task, busy, update, approve }: { task: Task; busy: boolean; update: (body: { status: string; evidence: string }) => void; approve: () => void }) {
   return <article className="task-card panel"><div className="context-row"><Badge value={task.priority}/><code className="task-id" title={task.id}>{task.id.slice(0, 8)}</code></div><h3>{task.title}</h3><p className="task-assignee">@{task.assignee || 'Chưa phân công'}</p>{task.criteria && <details><summary>Tiêu chí nghiệm thu</summary><p>{task.criteria}</p></details>}{task.dependencies?.length > 0 && <p className="muted">Phụ thuộc: {task.dependencies.join(', ')}</p>}<form key={`${task.status}:${task.evidence}`} onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); update({ status: String(values.get('status')), evidence: String(values.get('evidence')) }); }}><label className="sr-only" htmlFor={`status-${task.id}`}>Trạng thái</label><select id={`status-${task.id}`} name="status" defaultValue={task.status}>{[...new Set([...columns, task.status])].map(status => <option key={status}>{status}</option>)}</select><label>Bằng chứng<textarea name="evidence" defaultValue={task.evidence || ''} placeholder="Kết quả kiểm tra, đường dẫn, ghi chú…" rows={2}/></label><div className="task-actions"><button className="secondary" disabled={busy}>Lưu</button><button type="button" className="text-button" disabled={busy} onClick={approve}>Phê duyệt</button></div></form></article>;
 }

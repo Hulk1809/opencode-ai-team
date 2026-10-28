@@ -7,6 +7,7 @@ import { Store } from './store.ts';
 import { Team } from './team.ts';
 import { connect } from './opencode.ts';
 import { handleMcp } from '../../../packages/team-mcp/src/index.ts';
+import { prepareReview, approveReview } from './review.ts';
 
 const port=z.coerce.number().int().min(1024).max(65535).parse(process.env.PORT??4310);
 const data=resolve(process.env.TEAM_DATA_DIR??'.data');mkdirSync(data,{recursive:true,mode:0o700});
@@ -49,19 +50,40 @@ app.get('/api/state',(req,res)=>{
   res.json(state);
 });
 app.post('/api/projects',async(req,res)=>res.json(await team.project(req.body)));
+app.post('/api/projects/:id/approve-plan',(req,res)=>res.json(team.approveProject(req.params.id,req.body)));
 app.post('/api/projects/:id/pause',(req,res)=>{const {paused}=z.object({paused:z.boolean()}).parse(req.body);res.json(store.patch('projects',req.params.id,{paused}));team.changed();});
 app.post('/api/messages',(req,res)=>res.json(team.send(req.body)));
 app.post('/api/messages/:id/retry',(req,res)=>{const m=store.get('messages',req.params.id);if(!['error','uncertain'].includes(m.status)||m.attempts>=3)throw new Error('Retry chỉ cho error/uncertain, tối đa 3 lần');store.patch('messages',m.id,{status:'queued',error:null});team.changed();res.json({ok:true});});
 app.post('/api/tasks',(req,res)=>res.json(team.task(req.body)));
 app.post('/api/tasks/:id',(req,res)=>res.json(team.updateTask(req.params.id,req.body,'user')));
-app.post('/api/tasks/:id/approve',(req,res)=>{const t=store.get('tasks',req.params.id);if(t.status!=='Done'||!t.evidence)throw new Error('Cần QA Done với evidence');res.json(store.patch('tasks',t.id,{approved:true,approvedAt:new Date().toISOString()}));team.changed();});
+app.post('/api/tasks/:id/execute',(req,res)=>res.json(team.executeTask(req.params.id,'user')));
+app.post('/api/tasks/:id/review',async(req,res)=>res.json(await prepareReview(team,req.params.id)));
+app.post('/api/tasks/:id/approve',async(req,res)=>res.json(await approveReview(team,req.params.id)));
+app.get('/api/tasks/:id/patch',(req,res)=>{const t=store.get('tasks',req.params.id);if(!t.approved||!t.review)throw new Error('Snapshot chưa được human duyệt');res.type('text/plain').setHeader('Content-Disposition',`attachment; filename="task-${t.id}.patch"`);res.send(t.review.patch);});
+app.post('/api/tasks/:id/integrated',async(req,res)=>{
+  const {commit}=z.object({commit:z.string().regex(/^[0-9a-f]{40}$/)}).parse(req.body);
+  const t=store.get('tasks',req.params.id);if(!t.approved)throw new Error('Chưa human approve');
+  const {execFileSync}=await import('node:child_process');
+  const path=store.get('projects',t.projectID).path;
+  execFileSync('git',['-C',path,'merge-base','--is-ancestor',commit,'HEAD']);
+  // ponytail: explicit human attestation, not proof patch equals commit; no automatic merge.
+  res.json(store.patch('tasks',t.id,{integratedAt:new Date().toISOString(),integrationCommit:commit,integrationAttestedBy:'human'}));team.changed();
+});
 app.post('/api/agents/:id',async(req,res)=>{const {model}=z.object({model:z.string().min(3).max(200)}).parse(req.body);await team.setModel(req.params.id,model);res.json({ok:true});});
 app.get('/api/models',async(_req,res)=>{const {client}=await connect();const models=await client.model.list();res.json(JSON.parse(JSON.stringify(models,(key,value)=>['settings','headers','apiKey','auth','password','token'].includes(key)?undefined:value)));});
 app.get('/api/projects/:id/diff',async(req,res)=>res.json({diff:await team.diff(req.params.id)}));
 app.use('/api',(_req,res)=>res.status(404).json({error:'Not found'}));
 app.use(express.static(resolve('apps/web/dist')));
 app.use((err:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{console.error(JSON.stringify({kind:'http.error',error:String(err)}));if(!res.headersSent)res.status(err instanceof z.ZodError?400:409).json({error:String(err)});});
-app.listen(port,'127.0.0.1',()=>{console.log(`Dashboard http://127.0.0.1:${port}\nLogin token: ${token}`);});
+const http=app.listen(port,'127.0.0.1',()=>{console.log(`Dashboard http://127.0.0.1:${port}\nLogin token: ${token}`);});
+function shutdown() {
+  if(team.stopping)return;
+  team.stopping=true;
+  for(const res of subscribers)res.end();
+  http.close(()=>process.exit(0));
+  setTimeout(()=>process.exit(0),10000).unref();
+}
+process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
 void team.health();setInterval(()=>void team.health(),15000).unref();setInterval(()=>void team.tick(),1000).unref();
 async function events() {
   for(;;) {
