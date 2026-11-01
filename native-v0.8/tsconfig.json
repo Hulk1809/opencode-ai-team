@@ -1,0 +1,4 @@
+{
+  "compilerOptions":{"target":"ES2022","lib":["ES2022","DOM","ESNext.Disposable"],"module":"ESNext","moduleResolution":"Bundler","jsx":"preserve","jsxImportSource":"solid-js","strict":true,"allowJs":true,"checkJs":false,"types":[]},
+  "include":["src/**/*.ts","src/**/*.tsx"]
+}

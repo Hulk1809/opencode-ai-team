@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {fork} from 'node:child_process';
+import {once} from 'node:events';
+import {fixture} from './fixtures/operation-fixture.mjs';
+import {protectedSnapshots} from '../src/protected-snapshots.mjs';
+import {brokerArtifacts} from '../src/broker-artifacts.mjs';
+import {brokerControl} from '../src/broker-control.mjs';
+for(const point of ['validation','bytes','manifest','revision','qa'])test(`protected writer SIGKILL at ${point}, reopen validates published source without double advance`,{timeout:10000},async t=>{
+  const root=await mkdtemp('/tmp/opencode/writer-crash-');t.after(()=>rm(root,{recursive:true,force:true}));await mkdir(root+'/source/src',{recursive:true});await writeFile(root+'/source/src/main.txt','original',{mode:0o600});
+  const child=fork(new URL('./fixtures/writer-crash-child.mjs',import.meta.url),[root,point],{stdio:['ignore','ignore','pipe','ipc']});t.after(()=>{if(!child.killed)child.kill('SIGKILL');});
+  const [stage]=await Promise.race([once(child,'message'),once(child,'exit').then(([code])=>{throw Error('Child exited '+code);})]);assert.equal(stage,point);
+  const exit=once(child,'exit');child.kill('SIGKILL');assert.equal((await exit)[1],'SIGKILL');
+  const f=await fixture(root,{recover:false}),s=await f.store.load(),task=s.tasks['["synthetic","task"]'];
+  const snapshots=protectedSnapshots({artifacts:brokerArtifacts(root+'/artifacts'),resolveBase:async()=>[],withSource:async(_,fn)=>fn(root+'/source')});
+  const control=brokerControl({...f.options,operations:{...f.options.operations,protectedSource:true,describeSnapshot:snapshots.describeSnapshot,writeProposal:snapshots.proposal}});await control.recover();
+  const snap=await snapshots.describeSnapshot(task.snapshotHash);assert.equal(snap.revision,task.revision);assert.equal(snap.acceptanceEpoch,task.acceptanceEpoch);
+  assert.equal(task.acceptanceEpoch,['revision','qa'].includes(point)?1:0);assert.equal(f.calls.length,0);
+  assert.equal(Object.values(s.operationReceipts??{}).filter(r=>r.kind==='qa').length,point==='qa'?1:0);
+  await control.recover();assert.equal((await f.store.load()).tasks['["synthetic","task"]'].acceptanceEpoch,task.acceptanceEpoch);
+});

@@ -1,5 +1,9 @@
 # AI Development Team — OpenCode V2
 
+## Source native V0.8 để review
+
+Snapshot development mới nằm tại [`native-v0.8/`](native-v0.8/README.md), độc lập với app legacy bên dưới. Native acceptance chưa chạy; peer cross-worktree còn BLOCKED. Không coi snapshot này là bản nâng cấp đã install hoặc release sẵn dùng.
+
 Ứng dụng thật: React/TypeScript, Express, SQLite WAL, SSE và MCP Streamable HTTP. Không mock agent hoặc hardcode câu trả lời. Service OpenCode dùng chung với Desktop/CLI, mỗi role có session và Git worktree riêng.
 
 ## Cài và chạy trên Ubuntu
