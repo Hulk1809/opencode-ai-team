@@ -14,7 +14,8 @@ test('Desktop GUI export is one parseable CJS artifact without fixture/server im
   const bundle=await readFile(new URL(pkg.exports['./gui-experimental'],root),'utf8');
   new Script(bundle); // Parse only: never evaluate plugin or contact Desktop/server.
   assert.doesNotMatch(bundle,/127\.0\.0\.1|localhost|4178|tests\/fixtures|fixtureProject|fixtureCalls|FIXTURE ONLY|\/fixture\/|@vite\/client/);
-  const allowed=new Set(['solid-js','solid-js/web','@opencode/plugin/gui','@opencode/plugin/rpc']);
+  // Official GUI shared runtime; Schema decodes durable routing draft preferences.
+   const allowed=new Set(['solid-js','solid-js/web','effect','@opencode/plugin/gui','@opencode/plugin/rpc','electron','node:fs','node:crypto','node:os','node:path','node:net']);
   const ast=ts.createSourceFile('gui.cjs',bundle,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
   const external=new Set();
   function visit(node){

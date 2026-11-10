@@ -7,7 +7,8 @@ import {checkWorktree,dataDirectory} from './persistence.mjs';
 import {join} from 'node:path';
 import {mkdir} from 'node:fs/promises';
 export const ROLES = ["admin", "frontend", "backend", "devops", "qa"];
-const validRole = (v) => ROLES.includes(v);
+export const WORKER_ROLES = ['admin', 'worker-1', 'worker-2', 'worker-3'];
+const validRole = (v) => [...ROLES, ...WORKER_ROLES].includes(v);
 const key = (directory) => `teams/${encodeURIComponent(directory)}`;
 const errMessage = errorText;
 const asArray = (value) => Array.isArray(value) ? value : Array.isArray(value?.data) ? value.data : [];
@@ -67,6 +68,151 @@ export class TeamRoom {
   /** @type {null | ((directory: string) => Promise<void>)} */
   onChange = null;
   constructor(ctx) { this.ctx = ctx; this.locks = new Map(); this.syncs=new Map(); }
+  // Only internal, synchronous data reducers belong here. Never accept a tool/RPC callback.
+  async #mutate(directory,owner,reduce) {
+    if(!this.ctx.storage.transaction)throw Error('ATOMIC_ROOM_STORAGE_REQUIRED');
+    const result=await this.ctx.storage.transaction(storage=>{
+      const team=storage.get(key(directory));
+      if(team&&typeof team.then==='function')throw Error('SYNCHRONOUS_ROOM_STORAGE_REQUIRED');
+      if(!team||team.status!=='ready')throw Error('ROOM_NOT_READY');
+      if(storage.admission){
+        const authoritative=storage.admission.get(directory);
+        if(authoritative){
+          if(team.owner&&(team.owner.id!==authoritative.id||team.owner.generation!==authoritative.generation))throw Error('STALE_ROOM_OWNER');
+          team.owner=authoritative;
+        }
+        else if(team.owner)throw Error('HOST_OWNER_MIGRATION_REQUIRED');
+      }
+      if(owner&&(team.owner?.id!==owner.id||team.owner?.generation!==owner.generation||team.owner?.revoked))throw Error('STALE_ROOM_OWNER');
+      const result=reduce(team,storage);
+      if(result&&typeof result.then==='function')throw Error('ASYNC_ROOM_REDUCER_FORBIDDEN');
+      team.revision=(team.revision??0)+1;
+      const written=storage.set(key(directory),team);
+      if(written&&typeof written.then==='function')throw Error('SYNCHRONOUS_ROOM_STORAGE_REQUIRED');
+      return structuredClone(result);
+    });
+    try{await this.onChange?.(directory);}catch{}
+    return result;
+  }
+  async takeOwnership(directory,id,expectedGeneration) {
+    if(typeof id!=='string'||!id||!Number.isSafeInteger(expectedGeneration)||expectedGeneration<0)throw Error('INVALID_ROOM_OWNER');
+    return this.#mutate(directory,null,(team,storage)=>{
+      if((team.owner?.generation??0)!==expectedGeneration)throw Error('ROOM_OWNER_CHANGED');
+      if(expectedGeneration>=Number.MAX_SAFE_INTEGER)throw Error('ROOM_OWNER_GENERATION_EXHAUSTED');
+      team.owner=storage.admission?storage.admission.takeover(directory,id,expectedGeneration):{id,generation:expectedGeneration+1};
+      // Old dispatch may have happened. Preserve IDs, never return these to waiting automatically.
+      for(const message of team.messages)if(['claimed','submitting'].includes(message.status)){
+        message.status=message.status==='claimed'&&!message.submission?'queued':'uncertain';
+        message.ownerGeneration=team.owner.generation;
+      }
+      return team.owner;
+    });
+  }
+  async revokeOwnership(directory,owner) {
+    if(!owner?.id||!Number.isSafeInteger(owner.generation))throw Error('ROOM_OWNER_REQUIRED');
+    return this.#mutate(directory,owner,(team,storage)=>{if(storage.admission){storage.admission.revoke(directory,team.owner);team.owner=storage.admission.get(directory);}else team.owner.revoked=true;return team.owner;});
+  }
+  async claimDiscussion(directory,owner,recipient) {
+    if(!owner?.id||!Number.isSafeInteger(owner.generation))throw Error('ROOM_OWNER_REQUIRED');
+    return this.#mutate(directory,owner,team=>{
+      const active=team.messages.filter(m=>['claimed','submitting','admitted','processing','uncertain'].includes(m.status));
+      if(active.some(m=>m.to===recipient||m.recipientSessionID&&m.recipientSessionID===team.members[recipient]?.sessionID)||active.length>=3)return null;
+      const message=team.messages.find(m=>m.to===recipient&&m.status==='queued');
+      if(!message)return null;
+      message.status='claimed';message.ownerGeneration=owner.generation;return message;
+    });
+  }
+  async transitionDiscussion(directory,owner,id,from,to) {
+    if(!owner?.id||!Number.isSafeInteger(owner.generation))throw Error('ROOM_OWNER_REQUIRED');
+    const allowed={claimed:['submitting','uncertain'],submitting:['admitted','uncertain']};
+    if(!allowed[from]?.includes(to))throw Error('INVALID_QUEUE_TRANSITION');
+    return this.#mutate(directory,owner,team=>{
+      const message=team.messages.find(m=>m.id===id);
+      if(!message||message.status!==from||message.ownerGeneration!==owner.generation)throw Error('QUEUE_STATE_CHANGED');
+      message.status=to;return message;
+    });
+  }
+  async enqueueDiscussion(directory,owner,from,recipient,text,idempotencyKey,caller=null,target=null) {
+    if(!owner?.id||!Number.isSafeInteger(owner.generation))throw Error('ROOM_OWNER_REQUIRED');
+    if(!validRole(from)||!validRole(recipient)||from===recipient||typeof text!=='string'||!text.trim()||text.length>10000||typeof idempotencyKey!=='string'||!idempotencyKey||idempotencyKey.length>160)throw Error('INVALID_DISCUSSION');
+    text=redact(text.trim());
+    return this.#mutate(directory,owner,team=>{
+      if(!team.members[from]||!team.members[recipient])throw Error('ROOM_MEMBER_REQUIRED');
+      if(caller&&(team.directory!==directory||team.projectID!==caller.projectID||team.workspaceID!==caller.workspaceID||caller.canonical!==directory||team.members[from].sessionID!==caller.sessionID||team.members[from].role!==caller.agent||team.members[from].directory!==caller.directory))throw Error('CANONICAL_MEMBER_BINDING_MISMATCH');
+      if(target&&['sessionID','role','directory'].some(key=>team.members[recipient][key]!==target[key]))throw Error('CANONICAL_RECIPIENT_CHANGED');
+      const previous=team.messages.find(m=>m.from===from&&m.to===recipient&&m.idempotencyKey===idempotencyKey);
+      if(previous){if(previous.text!==text)throw Error('Idempotency key đã dùng cho nội dung khác');return previous.id;}
+      if(team.messages.filter(m=>m.to===recipient&&m.status==='queued').length>=20)throw Error('Queue đầy');
+      const id=uid();team.messages.push({id,promptID:`msg_${uid().replaceAll('-','')}`,at:now(),from,to:recipient,text,idempotencyKey,status:'queued',kind:'control',ownerGeneration:owner.generation});
+      if(caller)Object.assign(team.messages.at(-1),{sourceSessionID:caller.sessionID,recipientSessionID:target.sessionID,sourceDirectory:caller.directory,projectID:caller.projectID,messageID:caller.messageID,callID:caller.id});
+      return id;
+    });
+  }
+  async recordSubmission(directory,owner,id,from,to,receipt=null) {
+    const allowed={claimed:['submitting'],submitting:['admitted','uncertain'],uncertain:['admitted']};
+    if(!allowed[from]?.includes(to))throw Error('INVALID_SUBMISSION_TRANSITION');
+    return this.#mutate(directory,owner,team=>{
+      const message=team.messages.find(message=>message.id===id);
+      if(!message||message.status!==from||(message.ownerGeneration!==owner.generation&&!(from==='uncertain'&&to==='admitted'&&message.submission)))throw Error('QUEUE_STATE_CHANGED');
+      if(to==='submitting'){
+        if(message.recipientSessionID!==team.members[message.to]?.sessionID)throw Error('DISPATCH_RECIPIENT_CHANGED');
+        message.submission={sessionID:message.recipientSessionID,requestID:message.promptID,state:'submitting'};
+      }else{
+        if(!message.submission||message.submission.requestID!==message.promptID)throw Error('SUBMISSION_JOURNAL_REQUIRED');
+        if(to==='admitted'&&receipt!==message.promptID)throw Error('SUBMISSION_RECEIPT_MISMATCH');
+        message.submission.state=to;
+        message.ownerGeneration=owner.generation;
+      }
+      message.status=to;
+      return message;
+    });
+  }
+  async recordDispatchEvidence(directory,owner,id,status,evidence) {
+    if(!['processing','uncertain'].includes(status))throw Error('INVALID_DISPATCH_EVIDENCE');
+    return this.#mutate(directory,owner,team=>{
+      const message=team.messages.find(m=>m.id===id);
+      if(!message?.submission||message.submission.requestID!==evidence.requestID||message.submission.sessionID!==evidence.sessionID||!['submitting','admitted','processing','uncertain'].includes(message.status))throw Error('DISPATCH_EVIDENCE_REQUIRED');
+      if(status==='processing'&&!evidence.userID)throw Error('DISPATCH_EVIDENCE_REQUIRED');
+      message.status=status;message.submission.state=status;message.ownerGeneration=owner.generation;message.reconciliation=evidence;
+      return message;
+    });
+  }
+  async completeDiscussion(directory,owner,id,evidence) {
+    return this.#mutate(directory,owner,team=>{
+      const message=team.messages.find(message=>message.id===id);
+      if(!message?.submission||message.submission.requestID!==evidence.requestID||message.submission.sessionID!==evidence.sessionID||!evidence.terminalID||!['completed','failed'].includes(evidence.status))throw Error('COMPLETION_EVIDENCE_REQUIRED');
+      if(['completed','failed'].includes(message.status)){
+        if(message.completion?.terminalID!==evidence.terminalID)throw Error('COMPLETION_CONFLICT');
+        return message;
+      }
+      if(!['admitted','processing','submitting','uncertain'].includes(message.status))throw Error('QUEUE_STATE_CHANGED');
+      message.status=evidence.status;message.ownerGeneration=owner.generation;message.completion=evidence;
+      message.submission.state=evidence.status;
+      if(evidence.status==='completed'&&evidence.text&&!message.responseID){
+        const responseID=uid();
+        team.messages.push({id:responseID,requestID:message.id,from:message.to,to:message.from,text:redact(evidence.text),status:'answered',at:now(),kind:'discussion-response',sourceSessionID:evidence.sessionID,recipientSessionID:message.sourceSessionID,hostAssistantIDs:evidence.assistantIDs});
+        message.responseID=responseID;
+      }
+      return message;
+    });
+  }
+  async replyDiscussion(directory,owner,id,caller,text) {
+    if(typeof text!=='string'||!text.trim()||text.length>10000)throw Error('INVALID_DISCUSSION');
+    return this.#mutate(directory,owner,team=>{
+      const request=team.messages.find(m=>m.id===id);
+      if(!request?.submission||request.to!==caller.agent||request.submission.sessionID!==caller.sessionID||team.members[caller.agent]?.sessionID!==caller.sessionID)throw Error('REPLY_BINDING_MISMATCH');
+      const identity=JSON.stringify([caller.sessionID,caller.messageID,caller.id]);
+      if(request.responseID){
+        const previous=team.messages.find(m=>m.id===request.responseID);
+        if(previous?.idempotencyKey!==identity||previous.text!==redact(text.trim()))throw Error('REPLY_CONFLICT');
+        return previous.id;
+      }
+      const responseID=uid();
+      team.messages.push({id:responseID,requestID:id,from:caller.agent,to:request.from,text:redact(text.trim()),status:'answered',at:now(),kind:'discussion-response',sourceSessionID:caller.sessionID,recipientSessionID:request.sourceSessionID,messageID:caller.messageID,callID:caller.id,idempotencyKey:identity});
+      request.responseID=responseID;
+      return responseID;
+    });
+  }
   async configure(directory,{maxWorkers=4,providerLimits={}}) {
     if(!Number.isInteger(maxWorkers)||maxWorkers<1||maxWorkers>4||!providerLimits||typeof providerLimits!=='object'||Array.isArray(providerLimits)||Object.values(providerLimits).some(n=>!Number.isInteger(n)||n<1||n>5))throw new Error('Concurrency worker 1..4, provider 1..5');
     return this.exclusive(directory,async()=>{const team=await this.read(directory);if(!team)throw new Error('Chưa có team');team.execution={maxWorkers,providerLimits};await this.write(directory,team);return team.execution;});
@@ -89,7 +235,7 @@ export class TeamRoom {
       const config=current.execution??{maxWorkers:4,providerLimits:{}};let workers=active.filter(m=>m.to!=='admin').length;
       const counts={};for(const m of active)counts[m.providerID??providers[m.to]]=(counts[m.providerID??providers[m.to]]??0)+1;
       const next=[];
-      for(const role of ROLES) {
+      for(const role of Object.keys(current.members)) {
         if(active.some(m=>m.to===role))continue;
          // Control FIFO is independent of execution FIFO; never run two prompts in one session.
           const control=current.messages.find(m=>m.to===role&&m.status==='waiting'&&m.kind==='control');
@@ -135,7 +281,16 @@ export class TeamRoom {
     return Promise.allSettled(claimed.map(message=>this.dispatch(directory,message)));
   }
   async read(directory) { return (await this.ctx.storage.get(key(directory))) ?? null; }
+  discussionInbox(team,role,{requestID,before,limit=24}={}) {
+    if(!validRole(role)||!Number.isInteger(limit)||limit<1||limit>100||[requestID,before].some(value=>value!==undefined&&(typeof value!=='string'||!value||value.length>160)))throw Error('INVALID_INBOX_QUERY');
+    const messages=team.messages.filter(message=>message.to===role&&(!requestID||message.requestID===requestID||message.id===requestID));
+    const end=before===undefined?messages.length:messages.findIndex(message=>message.id===before);
+    if(end<0)throw Error('INBOX_CURSOR_NOT_FOUND');
+    const start=Math.max(0,end-limit);
+    return {messages:messages.slice(start,end),...(start>0?{before:messages[start].id}:{})};
+  }
   async write(directory, value) {
+    if(this.ctx.storage.transaction)throw Error('LEGACY_ROOM_WRITE_REQUIRES_MIGRATION');
     for(const message of value.messages??[])if(message.promptID)message.lifecycle=lifecycle(message);
     const clean=v=>typeof v==='string'?redact(v):Array.isArray(v)?v.map(clean):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,clean(x)])):v;
     await this.ctx.storage.set(key(directory), clean(value));
@@ -143,6 +298,8 @@ export class TeamRoom {
     try { await this.onChange?.(directory); } catch {}
   }
   async exclusive(directory, work) {
+    if(this.ctx.storage.transaction)throw Error('LEGACY_ROOM_MUTATION_REQUIRES_MIGRATION');
+    // ponytail: legacy SDK path is instance-local only; cross-instance activation stays BLOCKED.
     const previous = this.locks.get(directory) ?? Promise.resolve();
     let release;
     const barrier = new Promise(res => {release = res;});
@@ -158,7 +315,7 @@ export class TeamRoom {
     if(typeof requestID!=='string'||!requestID.trim()||requestID.length>160||!Array.isArray(tasks)||tasks.length<1||tasks.length>4)throw Error('Batch không hợp lệ');
     const roles=new Set(),keys=new Set();
     for(const t of tasks){
-      if(!['backend','frontend','devops','qa'].includes(t.assignee)||roles.has(t.assignee)||typeof t.key!=='string'||!t.key||keys.has(t.key)||typeof t.title!=='string'||!t.title.trim()||t.title.length>160||typeof t.description!=='string'||!t.description.trim()||t.description.length>10000||!Array.isArray(t.dependencies??[])||(t.dependencies??[]).some(d=>typeof d!=='string'))throw Error('Task batch không hợp lệ');
+      if(!validRole(t.assignee)||t.assignee==='admin'||roles.has(t.assignee)||typeof t.key!=='string'||!t.key||keys.has(t.key)||typeof t.title!=='string'||!t.title.trim()||t.title.length>160||typeof t.description!=='string'||!t.description.trim()||t.description.length>10000||!Array.isArray(t.dependencies??[])||(t.dependencies??[]).some(d=>typeof d!=='string'))throw Error('Task batch không hợp lệ');
       roles.add(t.assignee);keys.add(t.key);
     }
     const canonical=JSON.stringify(tasks.map(t=>({key:t.key,assignee:t.assignee,title:t.title,description:t.description,dependencies:t.dependencies??[]})));
@@ -195,12 +352,15 @@ export class TeamRoom {
   async create(directory, name = "AI Team") {
     if (!directory?.startsWith("/")) throw new Error("Cần đường dẫn project tuyệt đối.");
     if (typeof name!=="string" || !name.trim() || name.length>80) throw new Error("Tên nhóm phải từ 1 đến 80 ký tự.");
+    const workers=this.ctx.options?.workers;
+    if(workers!==undefined&&(!Number.isInteger(workers)||workers<2||workers>3))throw Error('TEAM_WORKERS_MUST_BE_2_OR_3');
+    const roles=workers===undefined?ROLES:WORKER_ROLES.slice(0,workers+1);
     return this.exclusive(directory, async () => {
       let team = await this.read(directory);
       if (team?.status === "ready") return team;
       const available = asArray(await this.ctx.agent.list({location:{directory}}));
       const found = new Set(available.map(a => a?.id ?? a?.name).filter(Boolean));
-      const missing = ROLES.filter(role => !found.has(role));
+      const missing = roles.filter(role => !found.has(role));
       if (missing.length) throw new Error(`OpenCode chưa nạp agent: ${missing.join(", ")}. Hãy đặt .opencode/agents vào đúng project và reload.`);
        team ||= {name, directory, status: "creating", members: {}, messages: [], createdAt: now()};
        if(!team.members.admin&&!team.modelDefaults?.admin&&this.ctx.model) {
@@ -210,7 +370,7 @@ export class TeamRoom {
        }
       team.status = "creating";
       await this.write(directory, team);
-      for (const role of ROLES) {
+       for (const role of roles) {
         if (team.members[role]?.assigned) continue;
         try {
           let member=team.members[role];
@@ -251,7 +411,7 @@ export class TeamRoom {
         }
       }
       team.status="ready"; delete team.error;
-      team.messages.push({id:uid(), at:now(), from:"system", to:"all", text:"Đã tạo session thật cho 5 vai trò. Chưa chạy model cho tới khi có task.", status:"info"});
+      team.messages.push({id:uid(), at:now(), from:"system", to:"all", text:`Đã tạo ${roles.length} native sessions. Chưa chạy model cho tới khi có task.`, status:"info"});
       await this.write(directory, team);
       return team;
     });
@@ -264,9 +424,9 @@ export class TeamRoom {
     if(extra.taskID!==undefined&&(typeof extra.taskID!=='string'||!extra.taskID))throw new Error('Task context không hợp lệ');
     const message = await this.exclusive(directory, async () => {
       const team = await this.read(directory);
-      if (!team || team.status !== "ready") throw new Error("Chưa tạo team hoặc team chưa sẵn sàng");
+       if (!team || team.status !== "ready") throw new Error("Chưa tạo team hoặc team chưa sẵn sàng");
+       if (!team.members[recipient]) throw Error('ROOM_MEMBER_REQUIRED');
       if (from !== "owner" && !team.members[from]) throw new Error("Người gửi không thuộc team");
-       if (team.messages.filter(m=>m.to===recipient&&m.status==='waiting').length>=20) throw new Error('Queue đầy: tối đa 20 tin chờ mỗi role');
         const parent=from!=="owner" && team.messages.findLast(m=>m.to===from && ["queued","admitted"].includes(m.status));
         // Follow-ups inherit only explicit active-request scope, never infer a task from text.
         if(parent?.taskID&&extra.taskID===undefined)extra={...extra,taskID:parent.taskID};
@@ -276,7 +436,8 @@ export class TeamRoom {
          const existing=team.messages.find(m=>m.from===from&&m.to===recipient&&m.idempotencyKey===extra.idempotencyKey);
            if(existing){if(existing.text!==text||existing.taskID!==extra.taskID||(existing.kind??'execution')!==(extra.kind??'execution'))throw new Error('Idempotency key đã dùng cho nội dung khác');return {...existing,sessionID:team.members[recipient].sessionID};}
        }
-      const hops=(parent?.hops ?? 0)+(from==="owner" ? 0 : 1);
+       if (team.messages.filter(m=>m.to===recipient&&m.status==='waiting').length>=20) throw new Error('Queue đầy: tối đa 20 tin chờ mỗi role');
+       const hops=(parent?.hops ?? 0)+(from==="owner" ? 0 : 1);
       if(hops>4) throw new Error("Giới hạn 4 lần chuyển tiếp; cần Owner giao lượt mới.");
             const msg = {id:uid(), promptID:`msg_${uid().replaceAll("-","")}`, at:now(), from, to:recipient, text, status:'waiting',executionState:'Queued',hops,kind:'execution',scope:extra.taskID?'task':'project',...extra};
         if(parent)msg.parentRequestID=parent.id;

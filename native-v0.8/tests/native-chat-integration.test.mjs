@@ -10,7 +10,7 @@ test('native chat integration: bound Owner, peer queue, dedup and read-only reco
   const sessions=Object.fromEntries(Object.values(members).map(m=>[m.sessionID,{id:m.sessionID,agent:m.role,projectID,metadata:{teamDirectory:directory},location:{directory}}]));
   const ctx={location:{directory,project:{id:projectID}},storage:{get:async k=>structuredClone(store.get(k)),set:async(k,v)=>store.set(k,structuredClone(v))},session:{get:async({sessionID})=>sessions[sessionID],context:async()=>[],prompt:async input=>{calls.push(input);if(!admissions.has(input.id))admissions.set(input.id,{id:input.id,type:'user',delivery:'queue'});return admissions.get(input.id)}}};
   const room=new TeamRoom(ctx);
-  await room.write(directory,{directory,status:'ready',members,messages:[],tasks:[{id:'t',status:'working',dependencies:[]}]});
+  await room.write(directory,{directory,projectID,status:'ready',members,messages:[],tasks:[{id:'t',status:'working',dependencies:[]}]});
   const contract={},client={session:ctx.session,rpc:c=>{assert.equal(c,contract);return {snapshot:async({directory:d})=>room.snapshot(d)}}};
   const host={id:'owner-view',directory,location:{directory},project:{id:projectID},server:{id:'fixture-server',client,connected:true,compatible:true}};
   const attempt={id:`msg_${'a'.repeat(32)}`,text:'Owner request'};

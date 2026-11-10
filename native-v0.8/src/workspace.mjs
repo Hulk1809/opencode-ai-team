@@ -91,11 +91,12 @@ export class Workspace {
     }
     if(action==='task') {
       if(!['owner','admin'].includes(role)) throw new Error('Chỉ Owner/Admin tạo task');
-      if(typeof p.title!=='string'||!p.title.trim()||p.title.length>160||!['admin','frontend','backend','devops','qa'].includes(p.assignee)) throw new Error('Tên hoặc người nhận task không hợp lệ');
+      if(typeof p.title!=='string'||!p.title.trim()||p.title.length>160||typeof p.assignee!=='string'||!['admin','frontend','backend','devops','qa','worker-1','worker-2','worker-3'].includes(p.assignee)) throw new Error('Tên hoặc người nhận task không hợp lệ');
       const ids=p.inputAttachments??[];
       if(!Array.isArray(ids)||ids.length>10||!Array.isArray(p.acceptanceCriteria??[])||!Array.isArray(p.dependencies??[])) throw new Error('Task fields không hợp lệ');
       if(ids.some(id=>typeof id!=='string')||(p.acceptanceCriteria??[]).length>50||(p.acceptanceCriteria??[]).some(x=>typeof x!=='string'||x.length>2000)||(p.dependencies??[]).length>50||(p.dependencies??[]).some(id=>typeof id!=='string')) throw new Error('Task fields không hợp lệ');
       const current=await this.room.read(directory);
+      if(!current?.members?.[p.assignee]?.sessionID)throw new Error('Người nhận task chưa đăng ký trong team');
       if((p.dependencies??[]).some(id=>!(current.tasks??[]).some(task=>task.id===id))) throw new Error('Dependency không tồn tại');
       // Validate all inputs before granting any new file access.
       for(const id of ids) {const file=await this.files.get(directory,role,id);if(!['owner','admin',file.owner].includes(role)) throw new Error('Không có quyền chia sẻ input');}

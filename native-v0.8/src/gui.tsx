@@ -1,6 +1,12 @@
 import { Command, MenuItem, Panel, Plugin, Style, usePlugin } from "@opencode/plugin/gui"
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack } from "solid-js"
 import { TeamChatRPC } from "./rpc"
+import {PilotPane} from './pilot-pane'
+import {registerPilotOwner} from './pilot-owner-main'
+import {issueOwnerGrant} from './pilot-owner-authority.mjs'
+import {startHostOwnerBridge} from './host-owner-bridge.mjs'
+import {dialog} from 'electron'
+import pilotStyle from './pilot-pane.css?inline'
 import { errorText } from "./safety.mjs"
 import {ConversationItem,MessageBubble,ComposerTools,roleLabel} from './chat-components'
 import {chatStyle} from './chat-style'
@@ -28,14 +34,16 @@ export const style = `
 .ai-team-pane .file-preview pre{white-space:pre-wrap;overflow-wrap:anywhere}
 `
  type Team = {exists?:boolean,name?:string,status?:string,error?:string,members?:Record<string,{role:string,sessionID:string}>,awsAuth?:any[],tasks?:any[],messages?:Array<{id:string,at:string,from:string,to:string,text:string,status:string,error?:string,batchID?:string,eventType?:string,taskID?:string,dispatchedAt?:string,admittedAt?:string,startedAt?:number,completedAt?:string,correlation?:string,tools?:Array<{id:string,name:string,status:string,executed:boolean,result:string,error?:string}>}>}
-const roles=["admin","frontend","backend","devops","qa"]
+const LEGACY_ROLES=["admin","frontend","backend","devops","qa"]
 type Attachment={id:string,name:string,size:number,mime:string,limitation?:string,textLength:number,visibility?:string,revision?:string}
 
 export function TeamPane() {
   const ctx=usePlugin<typeof definition>()
+  if(ctx.options.officialPilot===true)return <PilotPane/>
   const readClient=()=>ctx.sessions.current()?.server.client??ctx.client
   const scope=guiScope()
   const [state,setState]=createSignal<Team>({exists:false})
+  const roles=()=>Object.keys(state().members??{}).length ? Object.keys(state().members??{}) : LEGACY_ROLES
   const [nativeMessages,setNativeMessages]=createSignal<any[]>([])
   const [transcriptError,setTranscriptError]=createSignal('')
   let refreshPending=false
@@ -239,7 +247,7 @@ export function TeamPane() {
   })
   onCleanup(()=>scope.dispose())
   return <div class="ai-team-host"><div class="ai-team-pane" classList={{'show-conversations':showConversations(),'show-details':showDetails()}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();void upload(e.dataTransfer?.files??null)}}>
-    <nav class="team-nav" aria-label="Cuộc trò chuyện"><strong class="brand">AI Team <small>Không gian hội thoại</small></strong><span class="nav-section">Hội thoại</span><For each={['team',...roles]}>{role=>{const messages=()=>thread(role);const last=()=>messages().at(-1);return <ConversationItem title={role==='team'?'Team Room':roleLabel(role)} initials={role==='team'?'AI':role.slice(0,2).toUpperCase()} preview={last()?.text.replace(/\s+/g,' ').slice(0,100)||'Chưa có tin nhắn'} at={last()?.at} team={role==='team'} selected={isChat()&&activeThread()===role} onSelect={()=>selectThread(role)}/>}}</For></nav>
+    <nav class="team-nav" aria-label="Cuộc trò chuyện"><strong class="brand">AI Team <small>Không gian hội thoại</small></strong><span class="nav-section">Hội thoại</span><For each={['team',...roles()]}>{role=>{const messages=()=>thread(role);const last=()=>messages().at(-1);return <ConversationItem title={role==='team'?'Team Room':roleLabel(role)} initials={role==='team'?'AI':role.slice(0,2).toUpperCase()} preview={last()?.text.replace(/\s+/g,' ').slice(0,100)||'Chưa có tin nhắn'} at={last()?.at} team={role==='team'} selected={isChat()&&activeThread()===role} onSelect={()=>selectThread(role)}/>}}</For></nav>
     <main class="team-main" classList={{'chat-view':isChat()}}><header><button class="mobile-back" aria-label="Mở danh sách hội thoại" onClick={()=>setShowConversations(true)}>Hội thoại</button><div class="chat-heading"><h3>{view()==='Team Chat'?'Team Room':view()==='Direct Messages'?roleLabel(recipient()):view()==='Tasks / Kanban'?'Tasks':view()==='Owner Requests'?'Requests':'Files'}</h3><small class="dim" title={directory()}>Project: {directory().split('/').filter(Boolean).pop()||'Chưa mở project'} · {isChat()?'Hội thoại · không phải trạng thái online':'Không gian nhóm'}</small></div><div class="header-actions"><input aria-label="Tìm tin nhắn" placeholder="Tìm tin nhắn…" value={query()} onInput={e=>setQuery(e.currentTarget.value)}/><button aria-label={`Thông báo: ${unresolved()} pending, ${inbox().unread} chưa xem`} onClick={()=>setView('Owner Requests')}>Requests <span role="status">{unresolved()}</span> pending <span class="unread-count">{inbox().unread} chưa xem</span></button><button aria-label="Cài đặt và giới hạn quyền" aria-expanded={showDetails()} onClick={()=>setShowDetails(!showDetails())}>Cài đặt</button></div></header>
     <nav class="content-tabs" aria-label="Nội dung"><For each={[['Direct Messages','Chat'],['Tasks / Kanban','Tasks'],['Owner Requests','Requests'],['Files & Documents','Files']]}>{([item,label])=><button aria-current={(item==='Direct Messages'?isChat():view()===item)?'page':undefined} onClick={()=>{setView(item);setShowConversations(false)}}>{label}</button>}</For></nav>
     <Show when={view()==='Owner Requests'}><section aria-label="Owner Requests">
@@ -269,7 +277,7 @@ export function TeamPane() {
           <Show when={msg.correlation==='ambiguous-inputs'}><small>Phản hồi trong Admin session; chưa xác định prompt nguồn vì nhiều input xen ngang.</small></Show>
           <For each={msg.tools??[]}>{tool=><details><summary>Tool {tool.name} · {tool.status} · {tool.executed?'đã thực thi':'chưa có bằng chứng thực thi'}</summary><small>Call ID: {tool.id} · Native/MCP: chưa xác định từ message contract</small><Show when={tool.result}><pre>{tool.result}</pre></Show><Show when={tool.error}><pre>{tool.error}</pre></Show></details>}</For>
           <Show when={msg.eventType==='batch.assigned'}><details><summary>Tiến độ từng task</summary><For each={(state().messages??[]).filter(m=>m.batchID===msg.batchID&&m.taskID)}>{request=><section><b>@{request.to} · {request.taskID} · {request.status}</b><p>{state().tasks?.find(t=>t.id===request.taskID)?.status}</p><small>Dispatch {request.dispatchedAt??'—'} · Admitted {request.admittedAt??'—'} · Started {request.startedAt?new Date(request.startedAt).toISOString():'—'} · Completed {request.completedAt??'—'}</small><Show when={request.error}><p>{request.error}</p></Show><pre>{JSON.stringify(state().tasks?.find(t=>t.id===request.taskID)?.logs??[],null,2)}</pre></section>}</For></details></Show>
-          <div class="message-actions"><button onClick={()=>void ctx.system.copy(msg.text)}>Copy</button><button onClick={()=>{setReply(`${msg.from}: ${msg.text.slice(0,300)}`);if(roles.includes(msg.from))setRecipient(msg.from)}}>Reply</button></div>
+          <div class="message-actions"><button onClick={()=>void ctx.system.copy(msg.text)}>Copy</button><button onClick={()=>{setReply(`${msg.from}: ${msg.text.slice(0,300)}`);if(roles().includes(msg.from))setRecipient(msg.from)}}>Reply</button></div>
           <Show when={msg.taskID&&state().tasks?.find(t=>t.id===msg.taskID)}>{task=><button class="task-reference" onClick={e=>openTask(task().id,e.currentTarget)}>Task: {task().title} · {task().status}</button>}</Show>
           <For each={files().filter(f=>msg.text.includes(f.id))}>{file=><div class="attachment"><b>{file.name}</b><span class="role-badge">{file.visibility??'private'}</span><small>{file.size.toLocaleString()} bytes · revision: {file.revision??'—'}</small><small>fileID: {file.id}</small><button onClick={()=>void openFile(file)}>Preview</button><button onClick={()=>void openFile(file,true)}>Download</button></div>}</For>
         </MessageBubble>}</For>
@@ -283,9 +291,9 @@ export function TeamPane() {
        <details class="composer-menu" onKeyDown={e=>{if(e.key==='Escape'){e.currentTarget.open=false;e.currentTarget.querySelector('summary')?.focus()}}}><summary aria-label="Thêm đính kèm và tùy chọn">+</summary><div class="composer-options"><select aria-label="File visibility" value={visibility()} onChange={e=>setVisibility(e.currentTarget.value)}><option value="private">Private (mặc định)</option><option value="restricted">Restricted (share từng người)</option><option value="team">Team Shared (project này)</option></select>
       <ComposerTools uploading={!!uploading()} onAttach={()=>picker.click()} onMention={role=>{setRecipient(role);setDraft(value=>`${value}${value&&!value.endsWith(' ')?' ':''}@${role} `)}} onEmoji={value=>setDraft(draft=>draft+value)}/>
       <select aria-label="Người nhận" value={recipient()} onChange={(e)=>setRecipient(e.currentTarget.value)}>
-        <For each={roles}>{role=><option value={role}>@{role}</option>}</For>
+        <For each={roles()}>{role=><option value={role}>@{role}</option>}</For>
        </select><small>Đính kèm cấp quyền cho người nhận khi gửi.</small><button disabled={busy()} onClick={()=>void load(true)}>Đồng bộ phản hồi</button></div></details>
-      <textarea aria-label="Task hoặc câu hỏi" rows={2} placeholder={`Nhắn tới @${recipient()}…`} value={draft()} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();void send()}}} onInput={(e)=>{setDraft(e.currentTarget.value);const mention=e.currentTarget.value.match(/@(admin|frontend|backend|devops|qa)\b/);if(mention)setRecipient(mention[1])}} />
+      <textarea aria-label="Task hoặc câu hỏi" rows={2} placeholder={`Nhắn tới @${recipient()}…`} value={draft()} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();void send()}}} onInput={(e)=>{setDraft(e.currentTarget.value);const mention=e.currentTarget.value.match(/@([a-z0-9-]+)\b/);if(mention&&roles().includes(mention[1]))setRecipient(mention[1])}} />
         <Show when={sendStatus()}><small role="status">{sendStatus()}</small></Show>
         <button class="send-button" aria-label={`Gửi tới @${recipient()}`} title="Native queue: chỉ Admin, text; target kiểm lại từ host và registry khi gửi" disabled={recipient()!=='admin' || !!attached().length || !ctx.sessions.current()?.server.connected || busy() || !!uploading() || !draft().trim()} onClick={send}>{busy()?'Đang gửi…':'Gửi'}</button>
        </div></Show>
@@ -298,9 +306,50 @@ export function TeamPane() {
 
 const definition=Plugin.define({
   i18n:{en:{"panel.title":"AI Team Chat","command.open":"Open AI Team Chat"}},
-  main(ctx){ctx.log.write("info","AI Team Chat GUI main loaded",{version:ctx.app.version})},
+  main(ctx){
+    const env=(globalThis as any).process?.env??{}
+    const authDir=env['OPENCODE_OWNER_AUTHORITY_DIR']||(env['OPENCODE_DESKTOP_TEST_ROOT']?`${env['OPENCODE_DESKTOP_TEST_ROOT']}/desktop`:`${env['XDG_CONFIG_HOME']||`${env['HOME']||'/home/hulk'}/.config`}/ai.opencode.desktop`)
+    if(authDir&&!(ctx as any).ownerAuthority){
+      const confirmOwnerDialog=async(win:any,opts:any)=>{
+        if(typeof win?.webContents?.executeJavaScript==='function'){
+          const res=await win.webContents.executeJavaScript(`new Promise(resolve=>{
+            const cfg=${JSON.stringify({title:opts?.title??'Owner Confirmation',message:opts?.message??'',detail:opts?.detail??'',buttons:opts?.buttons??['Hủy','Chấp thuận']})};
+            const dlg=document.createElement('dialog');
+            dlg.setAttribute('role','dialog');
+            dlg.setAttribute('aria-label',cfg.title);
+            dlg.style.cssText='position:fixed;inset:0;margin:auto;z-index:999999;padding:18px;border-radius:10px;border:1px solid #444;background:#18181b;color:#f4f4f5;max-width:520px;box-shadow:0 20px 50px rgba(0,0,0,0.6)';
+            const h=document.createElement('h3');h.textContent=cfg.title;h.style.margin='0 0 8px';
+            const p=document.createElement('p');p.textContent=cfg.message;p.style.margin='0 0 8px';
+            const pre=document.createElement('pre');pre.textContent=cfg.detail;pre.style.cssText='white-space:pre-wrap;font-size:12px;max-height:180px;overflow:auto;background:#09090b;padding:8px;border-radius:6px;margin:0 0 12px';
+            const row=document.createElement('div');row.style.cssText='display:flex;gap:10px;justify-content:flex-end';
+            cfg.buttons.forEach((label,idx)=>{
+              const b=document.createElement('button');
+              b.type='button';b.textContent=label;b.setAttribute('aria-label',label);
+              b.style.cssText='padding:8px 14px;border-radius:6px;cursor:pointer;border:1px solid #52525b;background:'+(idx===1?'#2563eb':'#27272a')+';color:#fff';
+              b.onclick=()=>{dlg.close();dlg.remove();resolve({response:idx})};
+              row.append(b);
+            });
+            dlg.append(h,p,pre,row);
+            document.body.append(dlg);
+            dlg.showModal();
+          })`);
+          return res;
+        }
+        return dialog.showMessageBox(win,opts);
+      };
+      void startHostOwnerBridge({
+        userDataDir:authDir,
+        hostVersion:ctx.app.version,
+        getWindow:(id:number)=>ctx.windows.get(id),
+        getClient:()=>ctx.client,
+        confirmDialog:async(win:any,input:any)=>(await confirmOwnerDialog(win,{type:'question',title:'Owner Execution Authority',message:`Cấp quyền Owner cho ${input?.operation??'authorizeExecution'}?`,detail:`Project: ${input?.canonical}\nTeam: ${input?.teamID}\nTask: ${input?.taskID??'—'}`,buttons:['Hủy','Chấp thuận'],defaultId:0,cancelId:0,noLink:true})).response===1,
+      }).then((b:any)=>{b.confirmOwnerDialog=confirmOwnerDialog;(ctx as any).ownerAuthority=b;ctx.log.write("info","Host Owner Authority Bridge ready",{socketPath:b.socketPath})})
+    }
+    registerPilotOwner(ctx,issueOwnerGrant);
+    ctx.log.write("info","AI Team Chat GUI main loaded",{version:ctx.app.version})
+  },
   setup(ctx){
-    ctx.add(Style,style+chatStyle)
+    ctx.add(Style,style+chatStyle+pilotStyle)
     const tab={id:"main",get title(){return "AI Team Chat"},closable:"compact" as const,fallback:true}
     ctx.add(Panel,{
       id:"main",region:"side",wide:true,

@@ -8,12 +8,176 @@ import { registerDiagnostics } from "./diagnostics.mjs"
 import { assertScopedPath } from "./permissions.mjs"
 import { trustedDevelopment } from "./native-development.mjs"
 import { nativeCaller } from "./native-caller.mjs"
+import { registerCanonicalDiscussion } from "./canonical-discussion.mjs"
+import { patchedCanonical, requirePatchedCanonical } from "./patched-host.mjs"
+import { approvedProject, gitBinding, hasHostOwnerSocket, registerOfficialCoordinator, verifyHostOwnerTicket, verifyPatchedSidecarBoundary } from "./official-coordinator.mjs"
+import { PilotRPC } from './pilot-rpc'
+import { memberActivity } from './pilot-ui.mjs'
+import {publicModels,memberModel,MODEL_SWITCH_BLOCKED} from './pilot-models.mjs'
+import {readReport} from './pilot-reports.mjs'
+import {consumeOwnerGrant} from './pilot-owner-authority.mjs'
+import {PEER_GENERATION,peerPlan,planHash,teamView} from './peer-team.mjs'
+import {PROTOCOL_VERSION,ownerSummary} from './peer-protocol.mjs'
+import {readyTasks,taskReadiness} from './peer-readiness.mjs'
+import {selectEngine} from './peer-engine-selection.mjs'
+import {cancelExecutionRPC} from './peer-cancel-rpc.mjs'
+import {readFileSync} from 'node:fs'
+import {join} from 'node:path'
+import {createHash} from 'node:crypto'
+import {homedir} from 'node:os'
+import {securityView} from './peer-security.mjs'
+
+// Tool schemas accept both legacy specialists and the opt-in flexible worker IDs.
+// Server-side TeamRoom still validates actual room membership and Admin authority.
+const TEAM_ROLE_IDS = ["admin", "frontend", "backend", "devops", "qa", "worker-1", "worker-2", "worker-3"]
+const TEAM_WORKER_IDS = TEAM_ROLE_IDS.filter(role => role !== "admin")
 
 export default Plugin.define({
   id:"ai-team-chat",
   async setup(ctx) {
+    const engine=selectEngine(ctx.options)
+    if(engine==='legacy-read-only'){
+      const legacyRead=()=>{
+        const base=ctx.options?.pilotStore??join(homedir(),'.local/share/opencode/ai-team-pilot')
+        const directory=join(base,createHash('sha256').update(ctx.location.project.canonical).digest('hex'))
+        let state=null;try{state=JSON.parse(readFileSync(join(directory,'team.json'),'utf8'))}catch(error){if((error as any).code!=='ENOENT')throw error}
+        if(state&&(state.projectID!==ctx.location.project.id||state.canonicalRoot!==ctx.location.project.canonical))throw Error('PILOT_RPC_PROJECT_MISMATCH')
+        return {directory,state}
+      }
+      await ctx.rpc.register(PilotRPC,{runtime:async()=>({engine,execution:'BLOCKED'}),snapshot:async (input:{directory:string})=>{
+        if((input as any).directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
+        const {state}=legacyRead()
+        return {...state,engine,readOnly:true,execution:'BLOCKED'}
+      },report:async (input:{directory:string,id:string})=>{
+        if(input.directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
+        const {directory,state}=legacyRead()
+        return readReport(directory,state,ctx.location.project.id,input.id)
+      }} as any)
+      return
+    }
+    if(engine==='canonical'){
+       const coordinator=await registerOfficialCoordinator(ctx)
+       const runtime={generation:PEER_GENERATION,protocolVersion:PROTOCOL_VERSION,pluginID:'ai-team-chat',serverVersion:ctx.app.version,loadedAt:new Date().toISOString(),directory:ctx.location.directory}
+       await ctx.rpc.register(PilotRPC,{
+          runtime:async()=>runtime,
+          cancelExecution:async input=>cancelExecutionRPC(coordinator,input),
+         ownerPlan:async input=>{
+           const i=input as any
+           if(i.directory!==ctx.location.directory||i.generation!==PEER_GENERATION||i.plan?.requestID!==i.requestID)throw Error('PILOT_OWNER_AUTHORIZATION_REQUIRED')
+           consumeOwnerGrant(i.authorization,{root:ctx.location.project.canonical,projectID:ctx.location.project.id,operation:'ownerPlan',generation:i.generation,requestID:i.requestID,planHash:planHash(i.plan)})
+           if(!('ownerPlan' in coordinator))throw Error('PILOT_PROJECT_NOT_APPROVED')
+           return {plan:await coordinator.ownerPlan(i.plan)}
+         },
+        snapshot:async input=>{
+           if((input as {directory:string}).directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
+            if(!approvedProject(ctx))throw Error('PILOT_PROJECT_ROOT_REQUIRED')
+          const state=coordinator.read()
+          if(!state)return {status:'unprovisioned',reason:'PILOT_PROJECT_NOT_PROVISIONED',members:[],messages:[],tasks:[]}
+           if(state.projectID!==ctx.location.project.id)throw Error('PILOT_RPC_PROJECT_MISMATCH')
+            const modelCatalog=publicModels(await ctx.model.list())
+          const members=await Promise.all(state.members.map(async(member:any)=>{
+            const session=await ctx.session.get({sessionID:member.sessionID})
+            if(session.projectID!==state.projectID||session.location.directory!==member.directory||session.agent!==member.agent)throw Error('PILOT_RPC_MEMBER_BINDING_MISMATCH')
+             if(member.branch&&gitBinding(member.directory)!==member.branch)throw Error('PILOT_BRANCH_MISMATCH')
+             return {...member,activity:memberActivity(session,null),outcome:session.outcome??null,model:memberModel(session,modelCatalog),usage:{cost:session.cost,input:session.tokens?.input,output:session.tokens?.output}}
+          }))
+            const sidecarBoundary=verifyPatchedSidecarBoundary(ctx)
+            const hostOwnerReady=hasHostOwnerSocket()&&sidecarBoundary.ok
+            return {...teamView(state),members,modelCatalog,runtime:{...runtime,sidecarBoundary},...(state.mode==='peer'?{security:securityView(state),ownerSummary:ownerSummary(state),readyTaskIDs:readyTasks(state).map((t:any)=>t.id),readiness:state.tasks.filter((t:any)=>t.protocolVersion).map((t:any)=>({taskID:t.id,...taskReadiness(state,t)})),approvals:state.approvals??[],receipts:state.receipts??[],modelReceipts:state.modelReceipts??[],integrations:state.integrations??[],executions:state.executions??[]}:{}),modelSwitch:{allowed:hostOwnerReady,reason:hostOwnerReady?'HOST_OWNER_CAPABILITY_READY · B2.2 isolated host Owner authority active; không cấp execution.':!sidecarBoundary.ok?`BOUNDARY_MISMATCH_BLOCKED · ${sidecarBoundary.reason}`:MODEL_SWITCH_BLOCKED}}
+        },
+         createTeam:async (input,context)=>{
+           if((input as {directory:string}).directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
+            if(!approvedProject(ctx))return context.error('project_not_ready','Canonical project không hợp lệ.',{})
+          // RPC has no Owner principal. Existing teams may be reopened; provisioning needs trusted host setup.
+           if(!coordinator.read()){
+              try{const i=input as any;const plan=peerPlan(i.plan);if(i.generation!==PEER_GENERATION)throw Error('STALE_GENERATION');consumeOwnerGrant(i.authorization,{root:ctx.location.project.canonical,projectID:ctx.location.project.id,operation:'createTeam',generation:i.generation,requestID:i.requestID,planHash:planHash(plan)})}
+             catch{return context.error('owner_authorization_required','Cần xác nhận Owner qua hộp thoại Desktop để tạo team. Không tạo session hoặc worktree.',{})}
+           }
+           await coordinator.bootstrap((input as any).plan)
+          const state=coordinator.read()
+          if(!state)throw Error('PILOT_PROVISION_FAILED')
+           const members=await Promise.all(state.members.map(async(member:any)=>{
+            const session=await ctx.session.get({sessionID:member.sessionID})
+             return {...member,activity:memberActivity(session,null),outcome:session.outcome??null}
+          }))
+          return {...state,members}
+        },
+        report:async input=>{
+          const inp=input as {directory:string,id:string}
+          if(inp.directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
+          if(!('directory' in coordinator))throw Error('PILOT_PROJECT_NOT_APPROVED')
+          return readReport(coordinator.directory,coordinator.read(),ctx.location.project.id,inp.id)
+        },
+        ownerMessage:async input=>{
+          const inp=input as {directory:string,recipient:string,text:string,requestID?:string}
+           if(inp.directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
+           const i=input as any
+           if(i.generation!==PEER_GENERATION)throw Error('PILOT_OWNER_AUTHORIZATION_REQUIRED')
+           consumeOwnerGrant(i.authorization,{root:ctx.location.project.canonical,projectID:ctx.location.project.id,operation:'ownerMessage',generation:i.generation,requestID:i.requestID,planHash:planHash({recipient:i.recipient,text:i.text})})
+           const result=await coordinator.ownerSend({recipient:inp.recipient,text:inp.text,requestID:inp.requestID})
+          return {ok:true,message:result}
+        },
+        selectModel:async input=>{
+          const i=input as any
+          if(i.directory!==ctx.location.directory||i.generation!==PEER_GENERATION)throw Error('PILOT_OWNER_AUTHORIZATION_REQUIRED')
+          if(!('selectModel' in coordinator))throw Error('PILOT_PROJECT_NOT_APPROVED')
+          const verified:any=await verifyHostOwnerTicket(i.ticket,{
+            serverBoundary:verifyPatchedSidecarBoundary(ctx),
+            root:ctx.location.project.canonical,
+            projectID:ctx.location.project.id,
+            teamID:i.teamID,
+            memberID:i.memberID,
+            sessionID:i.sessionID,
+            generation:i.generation,
+            requestID:i.requestID,
+            expectedModel:i.expectedModel??null,
+            model:i.model,
+          })
+          const preference=await (coordinator as any).selectModel({
+            operation:'selectModel',
+            requestID:i.requestID,
+            generation:i.generation,
+            teamID:i.teamID,
+            memberID:i.memberID,
+            sessionID:i.sessionID,
+            expectedModel:i.expectedModel??null,
+            model:i.model,
+            capabilityID:verified.capabilityID,
+          })
+          return {ok:true,preference}
+        },
+        acknowledgeComposer:async input=>{
+          const i=input as any
+          if(i.directory!==ctx.location.directory||i.generation!==PEER_GENERATION)throw Error('PILOT_OWNER_AUTHORIZATION_REQUIRED')
+          if(!('acknowledgeComposer' in coordinator))throw Error('PILOT_PROJECT_NOT_APPROVED')
+          await verifyHostOwnerTicket(i.ticket,{
+            serverBoundary:verifyPatchedSidecarBoundary(ctx),
+            root:ctx.location.project.canonical,
+            projectID:ctx.location.project.id,
+            teamID:i.teamID,
+            sessionID:i.sessionID,
+            generation:i.generation,
+            requestID:i.requestID,
+            expectedModel:i.model,
+            model:i.model,
+          })
+          const preference=await (coordinator as any).acknowledgeComposer({
+            requestID:i.requestID,
+            generation:i.generation,
+            teamID:i.teamID,
+            sessionID:i.sessionID,
+            model:i.model,
+          })
+          return {ok:true,preference}
+        }
+      })
+      return
+    }
+    throw Error('PEER_ENGINE_SELECTION_INVALID')
     await registerDiagnostics(ctx)
     const room = new TeamRoom(ctx)
+    const canonicalRegistration=patchedCanonical(ctx)&&ctx.location.directory===ctx.location.project.canonical
+      ?await registerCanonicalDiscussion(ctx,room,null):null
     // SDK 2.2.0 Context has no message.list: do not discover another service for history.
     // No authenticated RPC principal or revision-freeze provider in this host yet.
     // Protected DONE must fail closed; never derive these capabilities from payload.
@@ -59,7 +223,7 @@ export default Plugin.define({
           const id=await room.sendAsSession(directory,sessionID,input.recipient,input.text,{...(input.kind?{kind:input.kind}:{}),...(input.taskID?{taskID:input.taskID}:{}),...(input.idempotencyKey?{idempotencyKey:input.idempotencyKey}:{})})
           return {id,canWait}
         },
-        memberInbox:async(input:any,_options?:any)=>{await check(input);const caller=await nativeCaller(ctx,room,sessionID);const team=await room.sync(directory);return {messages:team.messages.filter((m:any)=>m.to===caller.role).slice(-24)}}
+        memberInbox:async(input:any,_options?:any)=>{await check(input);const caller=await nativeCaller(ctx,room,sessionID);const current=await room.read(directory);const team=current.messages.some((m:any)=>m.submission)?current:await room.sync(directory);return room.discussionInbox(team,caller.role,input.query)}
       }
       const options={}
       return {directory,rpc,options}
@@ -157,7 +321,7 @@ export default Plugin.define({
         const route=await memberRPC(context.sessionID)
         return {content:JSON.stringify(await route.rpc.workspace({directory:route.directory,sessionID:context.sessionID,action:'owner_request',payload:input as Record<string,unknown>},route.options))}
       }})
-      editor.add({name:'assign_tasks',description:'Admin: atomically queue up to four role tasks in one batch. Existing registered workers only; dependencies use task keys or existing task IDs. No new permissions.',options:{namespace:'team'},input:{type:'object',properties:{requestID:{type:'string',minLength:1,maxLength:160},tasks:{type:'array',minItems:1,maxItems:4,items:{type:'object',properties:{key:{type:'string'},assignee:{type:'string',enum:['backend','frontend','devops','qa']},title:{type:'string'},description:{type:'string'},dependencies:{type:'array',items:{type:'string'}}},required:['key','assignee','title','description'],additionalProperties:false}}},required:['requestID','tasks'],additionalProperties:false},execute:async(input,context)=>{
+      editor.add({name:'assign_tasks',description:'Admin: atomically queue up to four role tasks in one batch. Existing registered workers only; dependencies use task keys or existing task IDs. No new permissions.',options:{namespace:'team'},input:{type:'object',properties:{requestID:{type:'string',minLength:1,maxLength:160},tasks:{type:'array',minItems:1,maxItems:4,items:{type:'object',properties:{key:{type:'string'},assignee:{type:'string',enum:TEAM_WORKER_IDS},title:{type:'string'},description:{type:'string'},dependencies:{type:'array',items:{type:'string'}}},required:['key','assignee','title','description'],additionalProperties:false}}},required:['requestID','tasks'],additionalProperties:false},execute:async(input,context)=>{
         const route=await memberRPC(context.sessionID);return {content:redact(JSON.stringify(await route.rpc.workspace({directory:route.directory,sessionID:context.sessionID,action:'assign_batch',payload:input as Record<string,unknown>},route.options)))}
       }})
       for(const [name,action] of Object.entries({batch_status:'batch_status',propose_aws_auth:'aws_propose',request_aws_auth:'aws_request'}))editor.add({name,description:action==='batch_status'?'Admin: sync batch status and per-task timestamps/errors/evidence.':'AWS project workflow only; DevOps proposes metadata account (12 digits), environment, purpose, scope, profile, method (sso-device-code or login-remote). Admin requests Owner review by requestID. Broker unavailable: BLOCKED; never include URL, code or credentials.',options:{namespace:'team'},input:{type:'object',properties:{payload:{type:'object',properties:{batchID:{type:'string'},requestID:{type:'string'},account:{type:'string'},environment:{type:'string'},purpose:{type:'string'},scope:{type:'string'},profile:{type:'string'},method:{type:'string',enum:['sso-device-code','login-remote']}},additionalProperties:false}},required:['payload'],additionalProperties:false},execute:async(input,context)=>{
@@ -184,48 +348,38 @@ export default Plugin.define({
       })
       editor.add({
         name:"send_message",
-        description:"Send execution or control request. Use kind=control for correction, unblock, review or cancellation; taskID must name explicit task, never infer from text. Control bypasses blocked execution FIFO, not permissions. Returns queued ID, not a reply.",
-        input:{type:"object",properties:{recipient:{type:"string",enum:["admin","frontend","backend","devops","qa"]},text:{type:"string",minLength:1,maxLength:10000},kind:{type:"string",enum:["execution","control"]},taskID:{type:"string",minLength:1},idempotencyKey:{type:"string",minLength:1,maxLength:160}},required:["recipient","text"],additionalProperties:false},
-        options:{namespace:"team"},
-        execute: async (input, context) => {
-           const x=input as {recipient:string,text:string,kind?:"execution"|"control",taskID?:string,idempotencyKey?:string}
-          const route=await memberRPC(context.sessionID)
-          const {id}=await route.rpc.memberSend({...x,directory:route.directory,sessionID:context.sessionID},route.options) as {id:string}
+        description:"Queue ordinary discussion to a registered team member. No execution, approval or dispatch. Returns durable queued ID, not a reply.",
+        input:{type:"object",properties:{recipient:{type:"string",enum:TEAM_ROLE_IDS},text:{type:"string",minLength:1,maxLength:10000}},required:["recipient","text"],additionalProperties:false},
+        options:{namespace:"team",codemode:false},
+         execute: async (input) => {
+            const x=input as {recipient:string,text:string}
+           const {id}=await requirePatchedCanonical(ctx).invoke(input) as {id:string}
            return {content:`Request ${id} đã queued tới ${x.recipient}; chưa phải acknowledgement hoặc task accepted. Theo dõi team.list_tasks/team.get_inbox; không gửi trùng khi hỏi trạng thái.`}
         },
       })
       editor.add({
-        name:"get_inbox",
+         name:"get_inbox",
         description:"Read actual AI Team replies addressed to the current role. Syncs real OpenCode assistant messages; never fabricates chat content.",
-        input:{type:"object",properties:{},additionalProperties:false},
-        options:{namespace:"team"},
+         input:{type:"object",properties:{requestID:{type:"string",minLength:1,maxLength:160},before:{type:"string",minLength:1,maxLength:160},limit:{type:"integer",minimum:1,maximum:100}},additionalProperties:false},
+         options:{namespace:"team",codemode:false},
         execute: async (_input, context) => {
           const route=await memberRPC(context.sessionID)
-          const {messages:inbox}=await route.rpc.memberInbox({directory:route.directory,sessionID:context.sessionID},route.options) as {messages:Array<{at:string,from:string,text:string}>}
-          return {content:inbox.length ? inbox.map((m: any)=>`[${m.at}] ${m.from}: ${m.text}`).join("\n\n") : "Chưa có tin trả lời thực tế."}
+           const {messages:inbox,before}=await route.rpc.memberInbox({directory:route.directory,sessionID:context.sessionID,query:_input},route.options) as {messages:Array<{at:string,from:string,text:string}>,before?:string}
+           return {content:(inbox.length ? inbox.map((m: any)=>`[${m.at}] id=${m.id} requestID=${m.requestID??m.id} ${m.from}: ${m.text}`).join("\n\n") : "Chưa có tin trả lời thực tế.")+(before?`\n\nOlder messages: before=${before}`:"")}
         },
       })
       editor.add({
         name:"ask_agent",
-        description:"Send asynchronously by default. Set dependency:true only if answer is required to continue; never wait on an already busy recipient. Poll at most 60s, then return pending ID.",
-        input:{type:"object",properties:{recipient:{type:"string",enum:["admin","frontend","backend","devops","qa"]},text:{type:"string",minLength:1,maxLength:10000},dependency:{type:"boolean"}},required:["recipient","text"],additionalProperties:false},
+        description:"Queue ordinary discussion through trusted canonical host invocation. No model dispatch or synchronous wait.",
+        input:{type:"object",properties:{recipient:{type:"string",enum:TEAM_ROLE_IDS},text:{type:"string",minLength:1,maxLength:10000},dependency:{type:"boolean"}},required:["recipient","text"],additionalProperties:false},
         options:{namespace:"team"},
-        execute: async (input, context) => {
-          const x=input as {recipient:string,text:string,dependency?:boolean}
-          const route=await memberRPC(context.sessionID)
-          const {id,canWait}=await route.rpc.memberSend({recipient:x.recipient,text:x.text,directory:route.directory,sessionID:context.sessionID},route.options) as {id:string,canWait?:boolean}
-          if(!x.dependency||!canWait)return {content:`Đã xếp câu hỏi ${id} tới ${x.recipient}; không giữ lượt model chờ. Tiếp tục việc độc lập, kiểm tra team.get_inbox sau.`}
-          for(let tries=0;tries<30;tries++) {
-            if(context.signal.aborted) throw new Error("Request cancelled")
-            await new Promise((resolve)=>setTimeout(resolve,2000))
-            const {messages}=await route.rpc.memberInbox({directory:route.directory,sessionID:context.sessionID},route.options) as {messages:Array<{requestID:string,text:string}>}
-            const reply=messages.find(m=>m.requestID===id)
-            if(reply) return {content:`[Trả lời thật của ${x.recipient}] ${reply.text}`}
-          }
-          return {content:`Đã gửi câu hỏi ${id} tới ${x.recipient}, nhưng chưa có phản hồi trong 60 giây. Dùng team_get_inbox để kiểm tra sau.`}
+        execute: async (input) => {
+           const x=input as {recipient:string,text:string,dependency?:boolean}
+           const {id}=await requirePatchedCanonical(ctx).invoke({recipient:x.recipient,text:x.text}) as {id:string}
+           return {content:`Đã xếp câu hỏi ${id} tới ${x.recipient}; chưa dispatch hoặc nhận phản hồi.`}
         },
       })
     })
-    return ()=>clearInterval(timer)
+    return async()=>{clearInterval(timer);await canonicalRegistration?.dispose()}
   },
 })

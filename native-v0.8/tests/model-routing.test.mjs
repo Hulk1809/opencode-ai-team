@@ -1,0 +1,80 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {DEFAULT_MODELS,routeModel,routingKey,selectCurrentComposer} from '../src/model-routing.mjs';
+const members=['admin','worker-1','worker-2'].map((role,i)=>({role,sessionID:`ses_${i}`,directory:`/repo/${i}`,agent:'build'}));
+const team={projectID:'p',teamID:'t',members};
+const allowed=[DEFAULT_MODELS.admin,DEFAULT_MODELS.worker];
+const catalog=allowed.map(m=>({...m,variants:['medium'],cost:[]}));
+const policy={projectID:'p',teamID:'t',mode:'smart',allowed};
+function route(role='worker-1',type='read',extra={}){
+  const member=members.find(m=>m.role===role);
+  return routeModel({team,member,task:{id:'task1',type,projectID:'p',teamID:'t',sessionID:member.sessionID},catalog,policy:{...policy,...extra}});
+}
+test('routing defaults, deterministic simple/complex/unknown, explicit upgrades and manual priority',()=>{
+  for(const m of members)assert.deepEqual(route(m.role,'unknown',{mode:'auto'}).selected,DEFAULT_MODELS[m.role==='admin'?'admin':'worker']);
+  assert.deepEqual(route().selected,DEFAULT_MODELS.worker);
+  assert.equal(route().complexity,'simple');
+  assert.deepEqual(route('worker-1','nonsense').selected,DEFAULT_MODELS.worker);
+  const complex=route('worker-1','security-review');
+  assert.equal(complex.approvalRequired,true);
+  assert.deepEqual(complex.selected,DEFAULT_MODELS.worker);
+  assert.deepEqual(route('worker-1','security-review',{allowWorkerUpgrade:true}).selected,DEFAULT_MODELS.admin);
+  assert.deepEqual(route('admin','read').selected,DEFAULT_MODELS.admin);
+  assert.deepEqual(route('worker-1','security-review',{manual:{ses_1:DEFAULT_MODELS.worker},allowWorkerUpgrade:true}).selected,DEFAULT_MODELS.worker);
+  assert.equal(route('worker-1','read',{mode:'manual'}).approvalRequired,true);
+  assert.equal(route().unattendedAllowed,false);
+  assert.equal(route().priceKnown,false);
+  assert.equal(route().id,route().id);
+  assert.equal(route('worker-1','read',{maxInputPrice:1}).approvalRequired,true);
+});
+test('routing rejects foreign project/team/member/task, constraints, model and variant; no fallback',()=>{
+  assert.throws(()=>route('worker-1','read',{projectID:'other'}),/POLICY_MISMATCH/);
+  assert.throws(()=>route('worker-1','read',{teamID:'other'}),/POLICY_MISMATCH/);
+  assert.throws(()=>route('worker-1','read',{allowed:[]}),/NOT_ALLOWED/);
+  assert.throws(()=>route('worker-1','read',{maxInputPrice:-1}),/CONSTRAINT_INVALID/);
+  assert.throws(()=>route('worker-1','read',{manual:{ses_1:{providerID:'bad',id:'bad'}}}),/NOT_ALLOWED/);
+  assert.throws(()=>route('admin','read',{defaults:{admin:DEFAULT_MODELS.worker}}),/DOWNGRADE/);
+  const input={team,member:members[1],task:{id:'task1',type:'read',projectID:'p',teamID:'t',sessionID:'ses_1'},catalog,policy};
+  assert.throws(()=>routeModel({...input,member:{...members[1],directory:'/other'}}),/MEMBER_MISMATCH/);
+  assert.throws(()=>routeModel({...input,task:{...input.task,sessionID:'ses_2'}}),/TASK_MISMATCH/);
+  assert.throws(()=>routeModel({...input,catalog:[]}),/UNAVAILABLE/);
+  assert.throws(()=>routeModel({...input,catalog:catalog.map(m=>({...m,variants:[]}))}),/UNAVAILABLE/);
+  assert.notEqual(routingKey({projectID:'p',teamID:'t',sessionID:'s'}),routingKey({projectID:'q',teamID:'t',sessionID:'s'}));
+  assert.throws(()=>routingKey({projectID:'p',sessionID:'s'}),/IDENTITY/);
+});
+test('current native composer validates idle and bindings, readback, never creates sessions or dispatches',async()=>{
+  const member=members[1];let sets=0,actual;
+  let native={id:member.sessionID,projectID:'p',agent:'build',location:{directory:member.directory},time:{idle:2,busy:1}};
+  let active={};
+  const current={id:member.sessionID,directory:member.directory,server:{client:{session:{get:async()=>native,active:async()=>active}}}};
+  const screen={composer:{setModel:m=>{sets++;actual=m;return true},model:()=>actual}};
+  const ctx={sessions:{current:()=>current},screen:{current:()=>screen}};
+  const scoped={...team,tasks:[],messages:[]};
+  await assert.rejects(selectCurrentComposer(ctx,{...team,tasks:undefined},member,DEFAULT_MODELS.worker,catalog),/SESSION_BUSY/);
+  assert.equal((await selectCurrentComposer(ctx,scoped,member,DEFAULT_MODELS.worker,catalog)).modelID,DEFAULT_MODELS.worker.id);
+  active={[member.sessionID]:{type:'running'}};
+  await assert.rejects(selectCurrentComposer(ctx,team,member,DEFAULT_MODELS.worker,catalog),/SESSION_BUSY/);
+  assert.equal(sets,1);
+  active=null;
+  await assert.rejects(selectCurrentComposer(ctx,team,member,DEFAULT_MODELS.worker,catalog),/SESSION_BUSY/);
+  active={};native.time={};
+  await selectCurrentComposer(ctx,scoped,member,DEFAULT_MODELS.worker,catalog);
+  native.projectID='q';
+  await assert.rejects(selectCurrentComposer(ctx,team,member,DEFAULT_MODELS.worker,catalog),/BINDING_MISMATCH/);
+  native.projectID='p';
+  screen.composer.model=()=>({providerID:'p',modelID:'wrong'});
+  await assert.rejects(selectCurrentComposer(ctx,scoped,member,DEFAULT_MODELS.worker,catalog),/READBACK_MISMATCH/);
+  await assert.rejects(selectCurrentComposer(ctx,team,members[2],DEFAULT_MODELS.worker,catalog),/OPEN_MEMBER_SESSION/);
+});
+
+test('model routing rejects project/session change while native readback is pending',async()=>{
+  const member=members[1];let resolve,sets=0;
+  const pending=new Promise(r=>{resolve=r;});
+  const original={id:member.sessionID,directory:member.directory,server:{client:{session:{get:()=>pending,active:async()=>({})}}}};
+  let current=original;
+  const screen={composer:{setModel:()=>{sets++;return true}}};
+  const attempt=selectCurrentComposer({sessions:{current:()=>current},screen:{current:()=>screen}},{...team,tasks:[],messages:[]},member,DEFAULT_MODELS.worker,catalog);
+  current={...original,id:'another-session'};
+  resolve({id:member.sessionID,projectID:team.projectID,agent:member.agent,location:{directory:member.directory}});
+  await assert.rejects(attempt,/BINDING_MISMATCH/);assert.equal(sets,0);
+});

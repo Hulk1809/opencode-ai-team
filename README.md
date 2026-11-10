@@ -1,87 +1,94 @@
-# AI Development Team — OpenCode V2
+# OpenCode AI Development Team
 
-## Source native V0.8 để review
+Hệ thống điều phối đội ngũ AI đa tác tử (Multi-Agent Development Team) trên nền tảng **OpenCode V2**, bao gồm:
+1. **Native Desktop Plugin V0.8 (`native-v0.8/`)**: Plugin tích hợp trực tiếp vào OpenCode Desktop (`2.2.5` / `2.2.6`) và Sidecar với mô hình 4-Peer Git Worktree DAG, xác thực quyền Owner bằng chữ ký số **Ed25519** (`HostOwnerBridge`), và thực thi kiểm thử trong sandbox **Bubblewrap (`bwrap-v1`)**.
+2. **Web Dashboard & MCP Server (`apps/`, `packages/`)**: Giao diện điều phối qua trình duyệt kết nối tới OpenCode V2 Service qua Express, SQLite WAL, SSE và MCP Streamable HTTP.
 
-Snapshot development mới nằm tại [`native-v0.8/`](native-v0.8/README.md), độc lập với app legacy bên dưới. Native acceptance chưa chạy; peer cross-worktree còn BLOCKED. Không coi snapshot này là bản nâng cấp đã install hoặc release sẵn dùng.
+---
 
-Ứng dụng thật: React/TypeScript, Express, SQLite WAL, SSE và MCP Streamable HTTP. Không mock agent hoặc hardcode câu trả lời. Service OpenCode dùng chung với Desktop/CLI, mỗi role có session và Git worktree riêng.
+## 1. Cấu trúc Thư mục Dự án
 
-## Cài và chạy trên Ubuntu
+```text
+opencode-ai-team/
+├── native-v0.8/                  # OpenCode V2 Native Plugin (4-Peer Git Worktree + bwrap-v1 Sandbox)
+│   ├── src/                      # Mã nguồn Coordinator, HostOwnerBridge, NativePeerAdapter, SolidJS GUI
+│   ├── tests/                    # Bộ kiểm thử đơn vị, tích hợp, fault-injection & bảo mật (279 tests)
+│   ├── scripts/                  # Tiện ích đóng gói broker release
+│   └── README.md                 # Phân tích mã nguồn chi tiết & hướng dẫn sử dụng Native Plugin V0.8
+├── apps/
+│   ├── server/                   # Backend Express + SQLite WAL + OpenCode V2 Dispatcher
+│   └── web/                      # Giao diện điều khiển React + TypeScript
+├── packages/
+│   ├── shared/                   # Các kiểu dữ liệu và schema dùng chung
+│   └── team-mcp/                 # Máy chủ MCP Streamable HTTP định danh theo từng Agent
+├── docs/
+│   └── TEAM-CHAT-ARCHITECTURE.md # Phân tích kiến trúc hệ thống, luồng dữ liệu & ranh giới bảo mật
+└── README.md                     # Tài liệu tổng quan & hướng dẫn sử dụng nhanh
+```
 
-1. Cài Node.js **24+**, npm và Git. Cài/mở OpenCode V2 Desktop hoặc chạy `opencode serve --service`. Provider/model phải dùng được trong OpenCode trước.
-2. Mở terminal tại thư mục `ai-team`:
+---
 
+## 2. Hướng dẫn Sử dụng Nhanh
+
+### A. Bản Native Desktop Plugin V0.8 (`native-v0.8/`) — Khuyên dùng
+
+Xem tài liệu phân tích mã nguồn chi tiết tại [`native-v0.8/README.md`](native-v0.8/README.md).
+
+1. **Build và chạy kiểm thử:**
+   ```bash
+   cd native-v0.8
+   npm ci
+   npm run build
+   npm test
+   ```
+2. **Khai báo plugin trong `~/.config/opencode/opencode.json`:**
+   ```json
+   {
+     "plugins": [
+       {
+         "package": "/đường/dẫn/tới/native-v0.8",
+         "options": {
+           "officialPilot": true,
+           "pilotWake": false,
+           "nativeDispatch": false,
+           "pilotStore": "/home/user/.local/share/opencode/ai-team-v08-clean"
+         }
+       }
+     ]
+   }
+   ```
+3. **Vận hành trong OpenCode Desktop:**
+   - Mở dự án Git trong OpenCode Desktop → mở panel **AI Team Chat**.
+   - Khởi tạo đội ngũ 4 Peer (`pilot-peer-1..4`), lập kế hoạch (`PLAN.md`), phân rã task theo đồ thị phụ thuộc (DAG), thực thi và chạy unit test trong sandbox `bwrap-v1`, chéo kiểm độc lập (`review`), và hợp nhất (`integrate`) về nhánh đích.
+
+---
+
+### B. Bản Web Dashboard & MCP (`apps/` + `packages/`)
+
+1. **Yêu cầu:** Node.js **24+**, npm, Git, và OpenCode V2 đang chạy (`opencode serve --service` hoặc OpenCode Desktop).
+2. **Khởi chạy tại thư mục gốc:**
    ```bash
    npm ci
    cp .env.example .env
    ./start.sh
    ```
+3. **Truy cập Dashboard:**
+   - Mở **http://127.0.0.1:4310** và đăng nhập bằng token một lần được sinh tại `.data/token` (`0600`).
+   - Thêm dự án Git tại **Projects → +**, duyệt đề xuất khảo sát của Admin tại **Khảo sát và duyệt đội AI**, và theo dõi tiến độ trên **Tasks**, **Sessions**, **Git Changes**.
+4. **Chạy dưới dạng Ubuntu User Service (Tùy chọn):**
+   ```bash
+   bash scripts/service.sh install
+   bash scripts/service.sh status
+   ```
+5. **Kiểm thử Web Dashboard:**
+   ```bash
+   npm test
+   npm run build
+   ```
 
-3. Mở **http://127.0.0.1:4310**. Đăng nhập bằng token in trong terminal. Token được tạo một lần tại `.data/token`, quyền `600`; không gửi token cho người khác.
-4. Chọn **Projects → +**, nhập tên và đường dẫn tuyệt đối tới **Git root đã có ít nhất một commit**. Có thể dùng project bất kỳ, không buộc là source ứng dụng này.
-5. Project mới tự gửi khảo sát chỉ đọc tới một session Admin thật. Đọc đề xuất tại **Khảo sát và duyệt đội AI**, bổ sung mục tiêu/trả lời câu hỏi, ghi điều kiện ngân sách và chọn số coding session chạy đồng thời. Nhấn **Duyệt phạm vi và đội** mới cho coding chạy. Khảo sát cũng tiêu thụ model usage; ngân sách ghi nhận chưa phải bộ giới hạn tiền tự động.
-6. Sau duyệt, Admin nhận mục tiêu để lập backlog và kích hoạt task. Mỗi role được đề xuất tối đa một session; chưa hỗ trợ nhiều Backend/Frontend cùng role. Session coding tạo theo nhu cầu, không tạo tất cả ngay. Project cũ giữ luồng trước, không tự khảo sát lại.
-7. Theo dõi Tasks, Sessions, Git Changes và execution logs. Duyệt shell permission trong OpenCode Desktop/CLI cùng service. Mỗi role hiển thị session ID riêng; cửa sổ không phải danh tính agent.
+---
 
-SDK `@opencode/client@2.1.4` khớp service đã kiểm tra. Backend dùng `Service.discover()` và `Service.headers()`, không mở port OpenCode hoặc yêu cầu copy password service. CLI trên máy khảo sát nằm tại `/home/hulk/.config/ai.opencode.desktop/cli/2.1.4-x64/opencode-cli`; thêm thư mục đó vào PATH nếu cần. Không sửa source OpenCode.
+## 3. Tài liệu Kiến trúc
 
-## Vận hành
-
-### Service Ubuntu — khuyến nghị
-
-```bash
-bash scripts/service.sh install   # build, tạo user service, bật khi đăng nhập
-bash scripts/service.sh status
-bash scripts/service.sh restart
-bash scripts/service.sh logs
-```
-
-Không chạy `./start.sh` đồng thời service vì cùng port. Service tự restart khi crash; dùng `systemctl --user stop ai-team` để dừng chủ động. Service chạy theo phiên user; chưa bật linger chạy trước đăng nhập. Installer không ghi đè unit có sẵn. Sau cập nhật source: `npm run build` rồi `bash scripts/service.sh restart`.
-
-### Task và review chặt chẽ hơn
-
-- Tasks có nút **Giao agent thực hiện**; MCP `team_execute_task` cho Admin/QA. Task tạo ra chưa tự chạy cho tới thao tác này hoặc thông điệp giao việc. Giới hạn ba lượt; chặn lượt chưa rõ kết quả.
-- Dependency chỉ được dispatch sau khi human xác nhận commit tích hợp, không chỉ dựa trên Done.
-- **Tạo snapshot review** lưu patch + SHA256. File mới phải được stage thủ công trước snapshot; không tự `git add .` và không stage `.opencode/opencode.jsonc` chứa MCP capability.
-- `team_request_review` tự tạo snapshot rồi nhắn QA. QA chạy shell test với `workdir` đúng worktree tác giả, gọi `team_verify_task` với assistant messageID/toolID thật. Backend kiểm tra shell completed, exit 0, thời điểm sau snapshot và digest. Đây là bằng chứng tool execution, không tự chứng minh lệnh test bao phủ đủ mọi tiêu chí.
-- Chỉ QA Done sau verification. Human **Phê duyệt** kiểm tra digest chưa đổi; tải patch đã duyệt để tích hợp thủ công. Không có API tự apply/merge.
-- Sau tích hợp và chạy test tại canonical checkout, nhập commit SHA đầy đủ vào **Xác nhận đã tích hợp thủ công**. Server kiểm tra commit thuộc lịch sử HEAD; nội dung đúng patch vẫn là xác nhận của human, không phải chứng minh tự động.
-- Sau restart, backend đối chiếu active sessions + permission requests, không tự gửi lại message `uncertain`. Nếu session đang chạy từ Desktop/CLI, dispatcher chờ thay vì gửi chồng.
-
-- `./start.sh`: build + start localhost. `npm start`: dùng frontend đã build. `npm run dev`: server qua tsx; frontend build lại bằng `npm run build`.
-- `.env`: `PORT`, `TEAM_DATA_DIR`, `TEAM_TOKEN` tùy chọn. `npm start` không tự nạp `.env`; script `start.sh` có nạp.
-- SQLite `.data/team.sqlite` và worktrees `.data/worktrees/` chứa dữ liệu thật. Dừng ứng dụng trước khi sao lưu **toàn bộ `.data/`**, gồm WAL/SHM nếu còn. Không xóa folder worktree bằng tay.
-- Restart giữ project/task/message. Tin đang xử lý trở thành `uncertain`; kiểm tra session thật rồi mới Retry, tối đa ba lần. Không tự retry sau mất kết nối vì có thể lặp thao tác code.
-- Pause chỉ dừng dispatch mới. Session đang chạy phải interrupt từ OpenCode nếu cần.
-- Model mỗi role đổi tại Agents sau khi session được tạo; dùng `provider/model`. Có thể dùng cùng model. Quyền session được lưu; sửa quyền/duyệt permission qua OpenCode.
-- QA mới được chuyển Done, phải kèm evidence và tool verification. Human approval ghi nhận cho snapshot tích hợp; **không tự merge**. Git Changes hiển thị diff/status từng worktree. File untracked xuất hiện trong status, chưa có nội dung trong `git diff HEAD`.
-- Code ở worktree khác chưa tự xuất hiện trong worktree QA/Frontend. Agent phải cung cấp đường dẫn/diff rõ ràng; human tích hợp sau review. Không tuyên bố task dependency đã tích hợp chỉ vì task Done.
-- `docs/` trong project đích dùng lưu API contract/ADR/context; công cụ inbox còn cung cấp task, project và đường dẫn worktree. Chưa có UI soạn context chuyên biệt.
-
-## An toàn
-
-Server chỉ bind `127.0.0.1`, có cookie HttpOnly/SameSite, kiểm tra Host/Origin và token MCP riêng cho từng agent. Không cấu hình reverse proxy/public Internet. Model API không trả provider settings/API key cho browser.
-
-OpenCode tools **không phải sandbox hệ điều hành**. Shell có quyền user hiện tại; mặc định yêu cầu người duyệt. Không cấp “always allow” cho shell rộng. Không đưa repository không tin cậy vào máy có credential nhạy cảm; dùng container/VM riêng. Không push, deploy production, sửa credential hoặc thao tác phá hủy tự động.
-
-## Kiểm tra
-
-```bash
-npm test
-npm run build
-npm audit --omit=dev
-# Các lệnh dưới gọi model thật, tạo fixture Git tại /tmp/opencode,
-# tạo session/worktree thật và phát sinh chi phí provider:
-node --import tsx tests/live.ts
-node --import tsx tests/orchestrator-live.ts
-```
-
-`tests/core.test.ts`: SQLite reopen, idempotency, conflict, hop limit, dependency, QA gate, restart uncertain và model ID. `tests/live.ts`: Backend viết file thật và hỏi Frontend qua MCP. `tests/orchestrator-live.ts`: Admin tạo task, giao Backend sửa bug toán học, QA xác minh; có thể bị chặn ở shell permission và phải báo đúng.
-
-## Giới hạn chưa được nhận là hoàn thành
-
-- Chưa tự tích hợp/merge worktree; approval không đồng nghĩa merge đã chạy.
-- Chưa có permission editor đầy đủ, cost dashboard chuẩn hóa, independent acceptance runner hoặc container sandbox.
-- Không có bảo đảm model luôn phân việc đúng; backlog là kết quả inference thật, logs là bằng chứng, không phải kịch bản chat giả.
-- Realtime events không replay từ OpenCode; transcript được lấy lại cuối lượt. Khi mất kết nối cần kiểm tra session.
-- Starter người dùng mô tả chưa nằm tại root được cấp; xem `docs/AUDIT.md`.
+- **Kiến trúc tổng thể & ranh giới an toàn:** [`docs/TEAM-CHAT-ARCHITECTURE.md`](docs/TEAM-CHAT-ARCHITECTURE.md)
+- **Phân tích mã nguồn & hướng dẫn Native Plugin V0.8:** [`native-v0.8/README.md`](native-v0.8/README.md)
