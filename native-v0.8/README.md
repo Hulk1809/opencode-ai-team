@@ -105,6 +105,6 @@ Thêm plugin vào mảng `"plugins"` trong file `~/.config/opencode/opencode.jso
 # Kiểm tra kiểu TypeScript và đóng gói giao diện GUI (dist/gui-experimental.cjs)
 npm run build
 
-# Chạy toàn bộ bộ kiểm thử (279 tests)
+# Chạy toàn bộ bộ kiểm thử (266 tests)
 npm test
 ```

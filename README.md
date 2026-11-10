@@ -12,7 +12,7 @@ Hệ thống điều phối đội ngũ AI đa tác tử (Multi-Agent Developmen
 opencode-ai-team/
 ├── native-v0.8/                  # OpenCode V2 Native Plugin (4-Peer Git Worktree + bwrap-v1 Sandbox)
 │   ├── src/                      # Mã nguồn Coordinator, HostOwnerBridge, NativePeerAdapter, SolidJS GUI
-│   ├── tests/                    # Bộ kiểm thử đơn vị, tích hợp, fault-injection & bảo mật (279 tests)
+│   ├── tests/                    # Bộ kiểm thử đơn vị, tích hợp, fault-injection & bảo mật (266 tests)
 │   ├── scripts/                  # Tiện ích đóng gói broker release
 │   └── README.md                 # Phân tích mã nguồn chi tiết & hướng dẫn sử dụng Native Plugin V0.8
 ├── apps/

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync,writeFileSync,readFileSync } from 'node:fs';
+import { mkdtempSync,mkdirSync,writeFileSync,readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { Store } from '../apps/server/src/store.ts';
@@ -8,6 +8,7 @@ import { Team } from '../apps/server/src/team.ts';
 import { prepareReview,approveReview } from '../apps/server/src/review.ts';
 
 test('real Git snapshot rejects untracked changes, missing tool evidence and stale approval; never merges',async()=>{
+  mkdirSync('/tmp/opencode',{recursive:true});
   const dir=mkdtempSync('/tmp/opencode/review-');const repo=join(dir,'repo');
   const git=(...args:string[])=>execFileSync('git',['-C',repo,...args],{encoding:'utf8'});
   execFileSync('git',['init','-q',repo]);writeFileSync(join(repo,'sum.mjs'),'export const sum=(a,b)=>a-b;\n');

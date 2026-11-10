@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Store } from '../apps/server/src/store.ts';
 import { Team } from '../apps/server/src/team.ts';
 import { modelRef } from '../apps/server/src/opencode.ts';
 
 test('SQLite persists; dedupe, loop guard, dependency, QA approval and recovery hold',()=>{
+  mkdirSync('/tmp/opencode',{recursive:true});
   const dir=mkdtempSync('/tmp/opencode/team-test-');const path=join(dir,'test.sqlite');
   const store=new Store(path);const team=new Team(store,dir,4310);
   const p=store.add('projects',{name:'test',path:dir,paused:true});

@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync,writeFileSync } from 'node:fs';
+import { mkdtempSync,mkdirSync,writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { Store } from '../apps/server/src/store.ts';
 import { Team } from '../apps/server/src/team.ts';
 
 test('new project queues read-only survey; coding gated by versioned human approval and allowed roles',async()=>{
+  mkdirSync('/tmp/opencode',{recursive:true});
   const dir=mkdtempSync('/tmp/opencode/plan-');const repo=join(dir,'repo');
   execFileSync('git',['init','-q',repo]);writeFileSync(join(repo,'README.md'),'# fixture\n');
   execFileSync('git',['-C',repo,'add','README.md']);execFileSync('git',['-C',repo,'-c','user.name=Test','-c','user.email=test@localhost','commit','-qm','fixture']);
