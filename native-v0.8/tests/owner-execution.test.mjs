@@ -80,15 +80,38 @@ test('signed Owner policy grants scoped start once; tampering, replay, revocatio
   await assert.rejects(c.protocol('submit',{...start,requestID:'failed-submit',taskVersion:task.taskVersion,reportID:task.submission},{}),/FAILED_ATTEMPT_REQUIRES_RECONCILE/);
   assert.match(readFileSync(member.directory+'/check.test.js','utf8'),/check failed/);
   assert.equal(git('rev-parse','HEAD'),state.integrations[0].resultCommit);
+  // Policy refresh with updated member model while task execution is outstanding preserves usedCalls; expired worktree attempt reconciles safely.
+  const nextModel={providerID:'fixture',id:'upgraded'};member.modelDefault=nextModel;
+  task.executionState='outstanding';state.executions.at(-1).state='admitted-by-adapter';delete state.executions.at(-1).stopReceipt;state.executions.at(-1).deadline=Date.now()-1;task.lease.expiresAt=Date.now()-1;
+  const refreshedModelPolicy=await bridge.signExecutionPolicy({window:7},{projectID:'project',teamID:'team',policy:{...integrationPolicy,models:[nextModel,model],capabilityID:'worktree-integration-v1:model-refresh'}});
+  await c.ownerPlan({...input,requestID:'model-refresh-grant',policy:refreshedModelPolicy});
+  assert.equal(state.executionPolicy.usedCalls,2);
+  const reconciled=await c.protocol('reconcile',{requestID:'reconcile-expired',taskID:task.id,taskVersion:task.taskVersion,ownershipGeneration:task.ownershipGeneration,planID:'p',planVersion:1,projectID:'project',teamID:'team',canonicalRoot:dir},{});
+  assert.equal(reconciled.status,'READY');assert.equal(state.executions.at(-1).stopReceipt.receiptID,`worktree-expired:${state.executions.at(-1).id}`);
+  // Verify-only task (files: []) runs requiredChecks on canonical HEAD and completes review/integrate/done without modifying files.
+  const verifyTask={id:'task-verify',text:'verify',protocolVersion:1,planID:'p',planVersion:1,taskVersion:1,ownershipGeneration:1,workRevision:1,status:'CLAIMED',assignee:'peer-1',reviewer:'peer-2',dependencies:[],files:[],requiredCapabilities:[],acceptanceCriteria:['test'],requiredChecks:['node --test'],executionState:'not-started',lease:{id:'lease-v',expiresAt:Date.now()+60000}};
+  state.tasks.push(verifyTask);git('-C',member.directory,'checkout','--','check.test.js');
+  await c.protocol('start',{...start,requestID:'verify-start',taskID:'task-verify',leaseID:'lease-v'},{});
+  const verifiedApply=await c.worktreeExec({mode:'apply',taskID:'task-verify',files:[]},{});
+  assert.equal(verifiedApply.sourceCommit,verifiedApply.baseCommit);assert.deepEqual(verifiedApply.files,[]);
+  verifyTask.status='REVIEW';verifyTask.review={memberID:'peer-2',workRevision:1,ownershipGeneration:1};
+  for(const owner of [member,reviewer]){
+    const r=reportBody({taskID:verifyTask.id,text:verifiedApply.sourceCommit,files:[],commands:verifiedApply.commands,status:'completed',diff:verifiedApply.diff,remaining:''},state,owner);
+    writeReport(c.directory,r);state.artifacts.push(r);
+    if(owner===member)verifyTask.submission=r.id;else verifyTask.review.reportID=r.id;
+  }
+  c.caller=async()=>reviewer;
+  assert.equal((await c.protocol('integrate',{...integrate,requestID:'verify-integrate',taskID:'task-verify',taskVersion:verifyTask.taskVersion},{})).status,'INTEGRATED');
+  assert.equal((await c.protocol('done',{...integrate,requestID:'verify-done',taskID:'task-verify',taskVersion:verifyTask.taskVersion},{})).status,'DONE');
   state.executionPolicy.usedCalls=4;
   await assert.rejects(c.ownerPlan({...input,requestID:'replay'}),/REPLAY/);
   assert.equal(state.executionPolicy.usedCalls,4);
   await c.ownerPlan({operation:'execution',requestID:'revoke',revoke:true,planID:'p',planVersion:1,digest:'digest'});
   assert.ok(state.executionPolicy.revokedAt);
-  task.status='CLAIMED';task.executionState='not-started';
+  task.status='CLAIMED';task.executionState='not-started';task.assignee='peer-1';task.lease={id:'lease',expiresAt:Date.now()+60000};
   c.caller=async()=>member;
-  await assert.rejects(c.protocol('start',{...start,requestID:'revoked-start',taskVersion:task.taskVersion},{}),/REVOKED/);
-  assert.equal(state.executionAuthorizations.length,3);
+  await assert.rejects(c.protocol('start',{...start,requestID:'revoked-start',taskVersion:task.taskVersion,ownershipGeneration:task.ownershipGeneration},{}),/REVOKED/);
+  assert.equal(state.executionAuthorizations.length,4);
 });
 
 test('server API without active() treats unknown context as busy; terminal idle as idle',async()=>{

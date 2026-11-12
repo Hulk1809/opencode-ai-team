@@ -57,7 +57,7 @@ export async function integrateReviewedTask(coordinator,input,authority){
   if(!primary?.branch||git(primary.directory,'symbolic-ref','--short','HEAD')!==primary.branch||git(primary.directory,'rev-parse','HEAD')!==input.sourceCommit||git(primary.directory,'status','--porcelain')||git(root,'rev-parse','HEAD')!==input.baseCommit)throw Error('PEER_INTEGRATION_COMMIT_INVALID');
   const common=git(root,'merge-base',input.baseCommit,input.sourceCommit);
   const sourceDiff=git(root,'diff','--name-only',common,input.sourceCommit).split('\n').filter(Boolean);
-  if(!sourceDiff.length||sourceDiff.some(p=>!task.files.some(f=>p===f||p.startsWith(f+'/'))))throw Error('PEER_INTEGRATION_SCOPE_INVALID');
+  if(task.files.length?(!sourceDiff.length||sourceDiff.some(p=>!task.files.some(f=>p===f||p.startsWith(f+'/')))):(sourceDiff.length||input.sourceCommit!==input.baseCommit))throw Error('PEER_INTEGRATION_SCOPE_INVALID');
   for(const commit of [input.baseCommit,input.sourceCommit])if(git(root,'rev-parse',`${commit}^{commit}`)!==commit)throw Error('PEER_INTEGRATION_COMMIT_INVALID');
   const sourceTree=git(primary.directory,'rev-parse',`${input.sourceCommit}^{tree}`);
   const receiptID=`integration_${randomUUID()}`;
@@ -79,7 +79,7 @@ export async function integrateReviewedTask(coordinator,input,authority){
       git(input.directory,'merge-base','--is-ancestor',input.baseCommit,resultCommit);git(input.directory,'merge-base','--is-ancestor',input.sourceCommit,resultCommit);
       if(git(input.directory,'status','--porcelain'))throw Error('PEER_INTEGRATION_DIRTY');
       const changed=git(input.directory,'diff','--name-only',input.baseCommit,resultCommit).split('\n').filter(Boolean);
-      if(!changed.length||changed.some(p=>!task.files.some(f=>p===f||p.startsWith(f+'/'))))throw Error('PEER_INTEGRATION_SCOPE_INVALID');
+      if(task.files.length?(!changed.length||changed.some(p=>!task.files.some(f=>p===f||p.startsWith(f+'/')))):(changed.length||resultCommit!==input.baseCommit))throw Error('PEER_INTEGRATION_SCOPE_INVALID');
       outcome={state:'merged',resultCommit,tree:git(input.directory,'rev-parse','HEAD^{tree}'),sourceTree,baseCommit:input.baseCommit,sourceCommit:input.sourceCommit};
     }
   }catch(error){outcome={state:'uncertain',error:String(error.message)};}

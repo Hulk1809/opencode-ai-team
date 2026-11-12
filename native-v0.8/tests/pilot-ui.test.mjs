@@ -12,6 +12,17 @@ test('Owner recipient validates peer identity without silently redirecting messa
   assert.equal(ownerRecipient({mode:'legacy'},'team'),'admin');
 });
 
+test('recipient UI removes misleading tag buttons and retains stale snapshot without authorizing sends',()=>{
+  const pane=readFileSync(new URL('../src/pilot-pane.tsx',import.meta.url),'utf8');
+  assert.ok(!pane.includes('class="b31-mention-chips"'));
+  assert.ok(pane.includes('Đến: '));
+  assert.ok(pane.includes('disabled={!draft().trim()||!valid()||!!rpcError()||sending()}'));
+  assert.ok(pane.includes('disabled={sending()||!!rpcError()} onClick={()=>toggleExecution(true)}'));
+  assert.ok(pane.includes('if(typeof document===\'undefined\'||!document.hidden)void refresh()'));
+  assert.ok(!pane.includes('{setSnapshot(undefined);setRPCError('));
+  assert.ok(!pane.includes('Execution Authorized: false (Live execution BLOCKED)'));
+});
+
 test('RPC errors and connection states remain readable and distinct',()=>{
   assert.equal(pilotError({cause:{reason:'PEER_WORKTREE_CHECK_FORBIDDEN'}}),'PEER_WORKTREE_CHECK_FORBIDDEN');
   assert.equal(pilotError({issues:[{message:'bad task'},{code:'INVALID_BINDING'}]}),'bad task; INVALID_BINDING');

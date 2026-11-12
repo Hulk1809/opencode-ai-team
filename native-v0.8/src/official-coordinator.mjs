@@ -84,9 +84,11 @@ const gitEnv=()=>({...Object.fromEntries(Object.entries(process.env).filter(([ke
 
 function browserCheckMounts(){
   // ponytail: reuse installed host runtime; configure portable discovery when packaging beyond this host.
-  const dependencies=join(homedir(),'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules');
-  const browsers=join(homedir(),'.cache/ms-playwright');
-  for(const path of [dependencies,browsers])if(realpathSync(path)!==path)throw Error('PEER_BROWSER_RUNTIME_INVALID');
+  const depDirs=[process.env.OPENCODE_PLAYWRIGHT_NODE_MODULES,join(homedir(),'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules'),join(homedir(),'.local/share/opencode/node_modules'),'/usr/local/lib/node_modules','/usr/lib/node_modules'].filter(Boolean);
+  const dependencies=depDirs.find(d=>{try{return realpathSync(d)===d&&lstatSync(join(d,'playwright'))&&lstatSync(join(d,'playwright-core'));}catch{return false;}});
+  const browserDirs=[process.env.PLAYWRIGHT_BROWSERS_PATH,join(homedir(),'.cache/ms-playwright'),'/opt/ms-playwright'].filter(Boolean);
+  const browsers=browserDirs.find(d=>{try{return realpathSync(d)===d&&lstatSync(d).isDirectory();}catch{return false;}});
+  if(!dependencies||!browsers)throw Error('PEER_BROWSER_RUNTIME_INVALID');
   return ['--ro-bind',join(dependencies,'playwright'),'/opt/peer-runtime/playwright','--ro-bind',join(dependencies,'playwright-core'),'/opt/peer-runtime/playwright-core','--ro-bind',browsers,'/opt/peer-browsers','--ro-bind',fileURLToPath(new URL('./peer-browser-check.mjs',import.meta.url)),'/opt/peer-browser-check.mjs'];
 }
 
@@ -329,7 +331,7 @@ export class OfficialCoordinator {
         if(state.mode!=='peer'||state.status!=='ready'||state.isolation!=='git-worktree'||state.canonicalRoot!==this.root||plan.ownerDecision!=='approve'||plan.needsOwner||!plan.discussionClosed||!p||Object.keys(p).some(k=>!['planID','planVersion','digest','maxActive','maxAttemptsPerTask','maxCalls','timeoutMs','models','capabilityID','signature'].includes(k))||p.planID!==plan.planID||p.planVersion!==plan.version||p.digest!==plan.digest||![p.maxActive,p.maxAttemptsPerTask,p.maxCalls,p.timeoutMs].every(n=>Number.isSafeInteger(n)&&n>0)||p.maxActive>4||p.maxAttemptsPerTask>10||p.maxCalls>1000||p.timeoutMs>3600000||!Array.isArray(p.models)||!p.models.length||p.models.some(model=>!state.members.some(m=>sameModel(m.modelDefault,model))))throw Error('EXECUTION_POLICY_INVALID');
         verifyHostOwnerPolicy(state,p);
         const prior=state.executionPolicy;
-        const refresh=prior&&['planID','planVersion','digest','maxActive','maxAttemptsPerTask','maxCalls','timeoutMs','models'].every(k=>JSON.stringify(prior[k])===JSON.stringify(p[k]));
+        const refresh=prior&&['planID','planVersion','digest','maxActive','maxAttemptsPerTask','maxCalls','timeoutMs'].every(k=>JSON.stringify(prior[k])===JSON.stringify(p[k]));
         if(state.tasks.some(t=>t.executionState==='outstanding')&&!refresh)throw Error('EXECUTION_OUTSTANDING');
         if(state.executionAuthorizations.some(r=>r.signature===p.signature))throw Error('EXECUTION_POLICY_REPLAY');
         state.executionPolicy={...structuredClone(p),usedCalls:refresh?prior.usedCalls:0};
@@ -603,6 +605,15 @@ export class OfficialCoordinator {
         const t=state.tasks.find(t=>t.id===input.taskID);
         if(!state.integrations?.some(r=>r.taskID===t?.id&&r.state==='merged'&&r.canonicalCommit===r.resultCommit&&r.commands?.length&&r.input.ownershipGeneration===t.ownershipGeneration&&r.input.workRevision===t.workRevision&&r.reviewReportID===t.review?.reportID))throw Error('PROTOCOL_CANONICAL_MERGE_NOT_PROVEN');
       }
+      if(action==='reconcile'){
+        const t=state.tasks.find(t=>t.id===input?.taskID),now=adapters.now??Date.now();
+        const attempt=state.executions?.findLast(e=>e.taskID===t?.id&&e.scope==='worktree'&&e.state==='admitted-by-adapter'&&!e.submission&&e.deadline<=now&&e.identity?.ownershipGeneration===t.ownershipGeneration&&e.identity?.workRevision===t.workRevision);
+        // ponytail: worktree apply runs synchronous bwrap children only; elapsed deadline without native submission proves scoped worker exited.
+        if(attempt&&t.assignee===memberID(m)&&t.status==='RUNNING'&&t.executionState==='outstanding'){
+          attempt.state='stop-verified';attempt.stopReceipt={executionID:attempt.id,identity:structuredClone(attempt.identity),receiptID:`worktree-expired:${attempt.id}`,scope:'worktree',outcome:'failed',sandbox:'bwrap-v1',at:now};
+          t.executionState='stopped';
+        }
+      }
       const result=protocolAction(state,memberID(m),action,input,{root:this.root,projectID:this.ctx.location.project.id,teamID:state?.teamID},{now:adapters.now,admit:adapters.admit??(({state,task,plan})=>{
         if(!state.executionPolicy)denyLiveAdmission();
         verifyHostOwnerPolicy(state);
@@ -618,7 +629,7 @@ export class OfficialCoordinator {
         if(row){const task=state.tasks.find(t=>t.id===result.id);task.lease.expiresAt=Math.max(task.lease.expiresAt,row.deadline);result.lease.expiresAt=task.lease.expiresAt;}
       }
       if(['submit','review','done','reassign_review'].includes(action)){
-        const key=`handoff:${result.id}:${result.taskVersion}`;
+        const key=`handoff:${result.id}:${result.taskVersion}`;state.messages??=[];
         if(!state.messages.some(message=>message.requestID===key))state.messages.push({id:randomUUID(),requestID:key,from:memberID(m),to:action==='submit'||action==='reassign_review'?result.reviewer:action==='review'&&result.status==='REWORK'?result.assignee:'team',action:'handoff',text:`Task event ${action}: ${result.id}, status ${result.status}. Read team_protocol before acting; preserve independent review and execution authorization.`,taskID:result.id,at:new Date().toISOString()});
       }
       return {value:result};
@@ -674,17 +685,18 @@ export class OfficialCoordinator {
       if(task.assignee!==memberID(member)||task.status!=='RUNNING'||task.executionState!=='outstanding'||!task.lease||task.lease.expiresAt<=Date.now())throw Error('PEER_WORKTREE_TASK_NOT_RUNNING');
       const execution=state.executions?.findLast(e=>e.taskID===task.id&&e.scope==='worktree'&&e.state==='admitted-by-adapter');
       if(!execution||execution.deadline<=Date.now()||execution.identity.ownershipGeneration!==task.ownershipGeneration||execution.identity.workRevision!==task.workRevision)throw Error('PEER_WORKTREE_EXECUTION_REQUIRED');
-      if(!Array.isArray(input.files)||!input.files.length)throw Error('PEER_WORKTREE_FILES_REQUIRED');
+      if(task.files.length?(!Array.isArray(input.files)||!input.files.length):input.files?.length)throw Error('PEER_WORKTREE_FILES_REQUIRED');
       const written=[],validated=[];
-      for(const f of input.files){
+      for(const f of input.files??[]){
         if(!f||typeof f.path!=='string'||typeof f.content!=='string'||!task.files.some(tf=>f.path===tf||f.path.startsWith(tf+'/')))throw Error('PEER_WORKTREE_FILE_OUT_OF_SCOPE');
         const abs=await assertScopedPath(member.directory,f.path);
         validated.push({f,abs});
       }
       try{
       // ponytail: clean fast-forward base only; divergent worktree needs explicit rework, never reset.
-      if(task.dependencies.length&&git(member.directory,'rev-parse','HEAD')!==git(this.root,'rev-parse','HEAD')){
-        if(git(member.directory,'status','--porcelain'))throw Error('PEER_WORKTREE_DIRTY');
+      if(git(member.directory,'rev-parse','HEAD')!==git(this.root,'rev-parse','HEAD')){
+        const dirty=git(member.directory,'status','--porcelain').split('\n').filter(Boolean).map(line=>line.slice(3).trim());
+        if(dirty.some(p=>!validated.some(({f})=>f.path===p||p.startsWith(f.path+'/')||f.path.startsWith(p+'/'))))throw Error('PEER_WORKTREE_DIRTY');
         git(member.directory,'merge','--ff-only',git(this.root,'rev-parse','HEAD'));
         for(const {f,abs} of validated)if(await assertScopedPath(member.directory,f.path)!==abs)throw Error('PEER_WORKTREE_FILE_OUT_OF_SCOPE');
       }
@@ -692,7 +704,7 @@ export class OfficialCoordinator {
         mkdirSync(dirname(abs),{recursive:true});writeFileSync(abs,f.content,'utf8');written.push(f.path);
       }
       const commands=await runChecks(member.directory);
-      git(member.directory,'add','--',...written);
+      if(written.length)git(member.directory,'add','--',...written);
       if(git(member.directory,'status','--porcelain'))git(member.directory,'commit','-m',`Task ${task.id} (${memberID(member)})`);
       const baseCommit=git(this.root,'rev-parse','HEAD'),sourceCommit=git(member.directory,'rev-parse','HEAD');
       const diff=git(member.directory,'show','--stat','--patch',sourceCommit);

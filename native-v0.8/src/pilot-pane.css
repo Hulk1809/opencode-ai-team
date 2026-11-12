@@ -138,7 +138,9 @@
 /* Sticky Bottom Chat Composer */
 .pilot-composer{flex:0 0 auto;position:sticky;bottom:0;background:var(--surface-base,#161b22);border-top:1px solid #21262d;padding:6px 0 0;z-index:2}
 .b31-composer-toolbar{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;margin-bottom:3px}
-.b31-recipient-select{display:inline-flex!important;align-items:center;gap:4px;margin:0!important;font-size:10.5px}
+.b31-recipient-select{display:inline-flex!important;flex-wrap:wrap;align-items:center;gap:6px;margin:0!important;font-size:12px}
+.b31-recipient-select button{min-height:32px;font-size:12px!important}
+.b31-recipient-select button[aria-pressed="true"]{outline:2px solid currentColor;outline-offset:1px;font-weight:700}
 .b31-recipient-select select{width:auto!important;margin:0!important;padding:1px 5px!important;font-size:10.5px!important}
 .b31-mention-chips{display:flex;align-items:center;gap:3px;flex-wrap:wrap}
 .b31-chip-btn{padding:1px 6px!important;font-size:10px!important;border-radius:99px!important;background:#0d1117!important}

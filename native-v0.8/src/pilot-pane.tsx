@@ -52,7 +52,7 @@ export function PilotPane(){
   let pendingTask:{key:string,body:string,requestID:string}|undefined
   const lines=(text:string)=>text.split('\n').map(s=>s.trim()).filter(Boolean)
   async function createTask(){
-    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||!valid()||sending())return
+    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||!valid()||rpcError()||sending())return
     const body=JSON.stringify({operation:'createTask',projectID:team().projectID,teamID:team().teamID,canonicalRoot:c.directory,planID:p.planID,planVersion:p.version,text:task().trim(),dependencies:taskDeps(),files:lines(taskFiles()),requiredCapabilities:['collaboration'],acceptanceCriteria:lines(taskCriteria()),requiredChecks:lines(taskChecks()),...(taskPeer().trim()?{assignedPeer:taskPeer().trim().replace(/^@/,'')}:{ }),...(taskReviewer()?{reviewPeer:taskReviewer()}:{})})
     if(pendingTask?.key!==key||pendingTask.body!==body)pendingTask={key,body,requestID:crypto.randomUUID()}
     setSending(true);setError('')
@@ -64,25 +64,25 @@ export function PilotPane(){
   }
 
   async function cancelExecution(record:any){
-    const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||sending())return
+    const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||rpcError()||sending())return
     setSending(true);setError('')
     try{await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'cancelExecution',requestID:crypto.randomUUID(),executionID:record.id,identity:record.identity})});if(currentKey()===key)await refresh()}
     catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
   }
   async function toggleCollaboration(){
-    const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||sending())return
+    const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||rpcError()||sending())return
     setSending(true);setError('')
     try{await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'collaboration',requestID:crypto.randomUUID(),enabled:!team()?.collaboration?.enabled})});if(currentKey()===key)await refresh()}
     catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
   }
   async function closeDiscussion(){
-    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||sending())return
+    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||!valid()||rpcError()||sending())return
     setSending(true);setError('')
     try{await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'closeDiscussion',requestID:crypto.randomUUID(),planID:p.planID,planVersion:p.version,digest:p.digest})});if(currentKey()===key)await refresh()}
     catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
   }
   async function reviewSharedPlan(decision:'approve'|'reject'){
-    const c=ctx.sessions.current(),p=team()?.plans?.at(-1),key=currentKey();if(!c||!p||!valid()||sending())return
+    const c=ctx.sessions.current(),p=team()?.plans?.at(-1),key=currentKey();if(!c||!p||!valid()||rpcError()||sending())return
     setSending(true);setError('')
     try{
       await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({requestID:crypto.randomUUID(),planID:p.planID,expectedVersion:p.version,digest:p.digest,decision})})
@@ -90,7 +90,7 @@ export function PilotPane(){
     }catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
   }
   async function publishPlan(){
-    const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||sending())return
+    const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||rpcError()||sending())return
     const previous=team()?.plans?.at(-1)
     const body=JSON.stringify({expectedVersion:previous?.version??0,...(previous?{planID:previous.planID}:{}),[planSource()]:planBody(),acceptanceCriteria:planCriteria().split('\n').map(s=>s.trim()).filter(Boolean),approvedScopeRef:scopeRef()})
     if(pendingPlan?.key!==key||pendingPlan?.body!==body)pendingPlan={key,body,requestID:crypto.randomUUID()}
@@ -166,7 +166,7 @@ export function PilotPane(){
         if(!valid()||json!==lastJSON){setSnapshot({team:value,serverID:current.server.id,directory:current.directory,key:currentKey()});lastJSON=json}
         setRPCError('')
       }
-    }catch(e){const active=ctx.sessions.current();if(!disposed&&request===sequence&&active?.id===current.id&&active.server.id===current.server.id&&active.directory===current.directory){setSnapshot(undefined);setRPCError(pilotError(e))}}
+    }catch(e){const active=ctx.sessions.current();if(!disposed&&request===sequence&&active?.id===current.id&&active.server.id===current.server.id&&active.directory===current.directory){setRPCError(`Dữ liệu cũ; chưa xác minh kết nối. ${pilotError(e)}`)}}
     finally{busy=false;if(!disposed)setLoading(false)}
   }
   function act(action:()=>void){setNotice('');try{action()}catch(e){setError(pilotError(e))}}
@@ -191,7 +191,7 @@ export function PilotPane(){
   async function handleSendMessage(){
     if(sending())return
     const current=ctx.sessions.current()
-    if(!current||!valid()){setError('Chọn project trước.');return}
+    if(!current||!valid()||rpcError()){setError('Cần làm mới kết nối project trước khi gửi.');return}
     if(!draft().trim()){setError('Nhập nội dung tin nhắn.');return}
     setSending(true);setError('');setNotice('')
     let to:string
@@ -212,7 +212,7 @@ export function PilotPane(){
     }
   }
   async function toggleExecution(refreshGrant=false){
-    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||sending())return
+    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||!valid()||rpcError()||sending())return
     setSending(true);setError('')
     try{
       await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'execution',requestID:crypto.randomUUID(),planID:p.planID,planVersion:p.version,digest:p.digest,...(!refreshGrant&&team()?.executionPolicy&&!team()?.executionPolicy?.revokedAt?{revoke:true}:{policy:{maxActive:4,maxAttemptsPerTask:5,maxCalls:40,timeoutMs:900000,models:team().members.map((m:any)=>m.modelDefault)}})})})
@@ -228,7 +228,7 @@ export function PilotPane(){
     if(screen.file.absolute(path)||path.split('/').includes('..')||/^[a-z][a-z\d+.-]*:/i.test(path))throw Error('Chỉ mở file trong workspace hiện tại.')
     if(!ctx.links.open({href:path,session:current,exact:true}))throw Error('Host không có file handler cho path này.')
   })}
-  onMount(()=>{void refresh();const timer=setInterval(()=>void refresh(),2000);onCleanup(()=>{disposed=true;clearInterval(timer);sequence++})})
+  onMount(()=>{void refresh();const timer=setInterval(()=>{if(typeof document==='undefined'||!document.hidden)void refresh()},2000);onCleanup(()=>{disposed=true;clearInterval(timer);sequence++})})
 
   return <section class="pilot-workspace b31-workspace" aria-label="AI Team V0.8">
     {/* 1. COMPACT TEAM HEADER */}
@@ -239,7 +239,7 @@ export function PilotPane(){
           Project: {team()?.canonicalRoot?.split('/').at(-1)??ctx.sessions.current()?.project?.name??ctx.sessions.current()?.directory?.split('/').at(-1)??'Chưa chọn'}
         </button>
         <Show when={team()}>
-          <button type="button" disabled={sending()} onClick={toggleCollaboration}>{team()?.collaboration?.enabled?'Tạm dừng phối hợp':'Bật phối hợp tự động'}</button>
+          <button type="button" disabled={sending()||!!rpcError()} onClick={toggleCollaboration}>{team()?.collaboration?.enabled?'Tạm dừng phối hợp':'Bật phối hợp tự động'}</button>
           <span class={`b31-pill ${latestPlan()?.ownerDecision==='approve'?'is-approved':latestPlan()?.ownerDecision==='reject'?'is-blocked':'is-pending'}`} title="Trạng thái Shared Plan">
             PLAN v{latestPlan()?.version??0} {latestPlan()?.ownerDecision==='approve'?'APPROVED':(latestPlan()?.ownerDecision??'PENDING').toUpperCase()}
           </span>
@@ -247,10 +247,10 @@ export function PilotPane(){
           <span class="b31-pill" title="Nguồn: session.active() & task graph">
             {runningPeers()} Running · {done()}/{team().tasks.length} Done
           </span>
-          <button type="button" disabled={sending()||latestPlan()?.ownerDecision!=='approve'} onClick={()=>toggleExecution()}>{team()?.executionPolicy&&!team()?.executionPolicy?.revokedAt?'Thu hồi execution':'Cấp quyền execution'}</button>
-          <Show when={team()?.executionPolicy}><button type="button" disabled={sending()} onClick={()=>toggleExecution(true)}>Ký lại execution</button></Show>
+          <button type="button" disabled={sending()||!!rpcError()||latestPlan()?.ownerDecision!=='approve'} onClick={()=>toggleExecution()}>{team()?.executionPolicy&&!team()?.executionPolicy?.revokedAt?'Thu hồi execution':'Cấp quyền execution'}</button>
+          <Show when={team()?.executionPolicy}><button type="button" disabled={sending()||!!rpcError()} onClick={()=>toggleExecution(true)}>Ký lại execution</button></Show>
           <span class="b31-pill" title="Scoped worktree execution; native edit/shell remain denied">
-             Execution: {team()?.executionAuthorization?.authorized===true?'WORKTREE AUTHORIZED':`BLOCKED · ${team()?.executionAuthorization?.reason??'Chưa xác minh quyền'}`}
+             Execution: {!rpcError()&&team()?.executionAuthorization?.authorized===true?'WORKTREE AUTHORIZED':`BLOCKED · ${rpcError()?'Mất kết nối':team()?.executionAuthorization?.reason??'Chưa xác minh quyền'}`}
           </span>
         </Show>
       </div>
@@ -525,9 +525,7 @@ export function PilotPane(){
                     <For each={team().members}>{(m:any)=><button type="button" aria-pressed={recipient()===(m.id??m.role)} onClick={()=>setRecipient(m.id??m.role)}>{memberLabel(m)}</button>}</For>
                   </div>
                 </Show>
-                <div class="b31-mention-chips">
-                  <For each={team().members}>{(m:any)=><button type="button" class="b31-chip-btn" onClick={()=>setDraft(v=>`${v}${v?' ':''}@${m.role} `)}>@{m.role}</button>}</For>
-                </div>
+                 <span role="status">Đến: {recipient()==='team'?'Toàn team':memberLabel(team().members.find((m:any)=>(m.id??m.role)===recipient()))}</span>
               </div>
               <div class="b31-composer-input-row">
                 <textarea
@@ -537,10 +535,10 @@ export function PilotPane(){
                   value={draft()}
                   onInput={e=>setDraft(e.currentTarget.value)}
                   onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!sending()&&draft().trim())void handleSendMessage()}}}
-                  placeholder="Nhập tin nhắn cho AI Team (@peer-1..4, Shift+Enter xuống dòng)…"
+                   placeholder="Nhập tin nhắn cho người nhận đã chọn; Shift+Enter xuống dòng…"
                 />
                 <div class="pilot-composer-actions b31-send-actions">
-                  <button type="button" class="b31-btn-primary b31-send-btn" disabled={!draft().trim()||!valid()||sending()} onClick={handleSendMessage}>
+                   <button type="button" class="b31-btn-primary b31-send-btn" disabled={!draft().trim()||!valid()||!!rpcError()||sending()} onClick={handleSendMessage}>
                     {sending()?'Đang gửi…':'Gửi yêu cầu Owner'}
                   </button>
                   <Show when={team().mode!=='peer'}>
@@ -550,7 +548,7 @@ export function PilotPane(){
               </div>
               <div class="pilot-section-head b31-composer-foot">
                 <small>Draft · {draft().length}/10000 ký tự · Enter để gửi, Shift+Enter xuống dòng</small>
-                <small class="pilot-muted">Owner xác thực qua host IPC · Tag gọi model khi phối hợp bật · Tạm dừng không hủy prompt đã nhận</small>
+                 <small class="pilot-muted">Chọn người nhận rồi gửi và xác nhận hộp thoại Owner. {team().collaboration?.enabled?'Phối hợp bật: xem delivery; Sent chưa phải xử lý xong.':'Phối hợp tắt: chỉ lưu tin, không gọi AI.'} Tag trong nội dung có thể gửi thêm Peer.</small>
               </div>
             </div>
           </Show>
@@ -572,7 +570,7 @@ export function PilotPane(){
                 <label>Tiêu chí nghiệm thu · mỗi dòng một mục<textarea rows={2} value={taskCriteria()} onInput={e=>setTaskCriteria(e.currentTarget.value)}/></label>
                 <label>Lệnh kiểm tra · mỗi dòng một lệnh<textarea rows={2} value={taskChecks()} onInput={e=>setTaskChecks(e.currentTarget.value)}/></label>
                 <small>Task mới ở DRAFT. Phạm vi file trùng bị chặn khi nhận việc. Không chạy lệnh hoặc gọi model.</small>
-                <button type="button" disabled={sending()||!task().trim()||!taskCriteria().trim()||!taskChecks().trim()} onClick={createTask}>Owner: Tạo và phân công task</button>
+                <button type="button" disabled={sending()||!!rpcError()||!task().trim()||!taskCriteria().trim()||!taskChecks().trim()} onClick={createTask}>Owner: Tạo và phân công task</button>
               </div>
             </details>
           </Show>
@@ -646,15 +644,15 @@ export function PilotPane(){
               <div class="pilot-section-head">
                 <div>
                   <h3>PLAN.md — Version {latestPlan()?.version??0}</h3>
-                  <Show when={latestPlan()?.ownerDecision==='approve'&&!latestPlan()?.discussionClosed}><button type="button" disabled={sending()} onClick={closeDiscussion}>Owner: Chốt thảo luận</button></Show>
+                  <Show when={latestPlan()?.ownerDecision==='approve'&&!latestPlan()?.discussionClosed}><button type="button" disabled={sending()||!!rpcError()} onClick={closeDiscussion}>Owner: Chốt thảo luận</button></Show>
                   <small class="pilot-muted">
-                    Owner decision: {(latestPlan()?.ownerDecision??'PENDING').toUpperCase()} · Execution Authorized: false (Live execution BLOCKED)
+                    Owner decision: {(latestPlan()?.ownerDecision??'PENDING').toUpperCase()} · Worktree grant: {!rpcError()&&team()?.executionAuthorization?.authorized===true?'AUTHORIZED':'BLOCKED / chưa xác minh'} · Task vẫn cần admission riêng
                   </small>
                 </div>
                 <Show when={team().plans?.length&&!latestPlan()?.ownerDecision}>
                   <div class="pilot-composer-actions">
-                    <button type="button" class="b31-btn-primary" disabled={sending()} onClick={()=>reviewSharedPlan('approve')}>Owner: Approve Plan</button>
-                    <button type="button" class="b31-btn-danger" disabled={sending()} onClick={()=>reviewSharedPlan('reject')}>Owner: Reject Plan</button>
+                    <button type="button" class="b31-btn-primary" disabled={sending()||!!rpcError()} onClick={()=>reviewSharedPlan('approve')}>Owner: Approve Plan</button>
+                    <button type="button" class="b31-btn-danger" disabled={sending()||!!rpcError()} onClick={()=>reviewSharedPlan('reject')}>Owner: Reject Plan</button>
                   </div>
                 </Show>
               </div>
@@ -687,7 +685,7 @@ export function PilotPane(){
                   <input type="file" accept=".md,text/markdown" aria-label="Đính kèm Markdown plan" onChange={async e=>{const f=e.currentTarget.files?.[0];if(!f)return;if(f.size>200000){setError('PLAN_TOO_LARGE');return}const key=currentKey(),content=await f.text();if(currentKey()===key){setPlanSource('markdown');setPlanBody(content)}}}/>
                   <label>Acceptance criteria · mỗi dòng một mục<textarea rows={3} value={planCriteria()} onInput={e=>setPlanCriteria(e.currentTarget.value)}/></label>
                   <label>Approved scope reference<input value={scopeRef()} onInput={e=>setScopeRef(e.currentTarget.value)} placeholder="todo-git/v1"/></label>
-                  <button type="button" class="b31-btn-primary" disabled={sending()||!planBody().trim()||!planCriteria().trim()||!scopeRef().trim()} onClick={publishPlan}>Gửi shared plan</button>
+                  <button type="button" class="b31-btn-primary" disabled={sending()||!!rpcError()||!planBody().trim()||!planCriteria().trim()||!scopeRef().trim()} onClick={publishPlan}>Gửi shared plan</button>
                 </div>
               </details>
 
@@ -797,7 +795,7 @@ export function PilotPane(){
                   </div>}</For>
                   <For each={team().executions??[]}>{(record:any)=><div class="b31-mini-row">
                     <code>{record.id}</code>
-                    <button type="button" disabled={sending()||!!record.cancellation} onClick={()=>cancelExecution(record)}>Owner: request cancellation · {record.id}</button>
+                    <button type="button" disabled={sending()||!!rpcError()||!!record.cancellation} onClick={()=>cancelExecution(record)}>Owner: request cancellation · {record.id}</button>
                   </div>}</For>
                 </div>
               </div>
