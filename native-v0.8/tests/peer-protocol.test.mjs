@@ -19,6 +19,44 @@ function fixture(){
   return {ctx,p,source,payload,call,taskInput,propose,close,get state(){return state;},set now(n){now=n;},get now(){return now;}};
 }
 
+test('failed scoped attempt reconciles early only for assignee with verified stop',()=>{
+  const f=fixture();let t=f.propose();f.close();t=f.call('peer-1','ready',f.taskInput(t));
+  t=f.call('peer-1','claim',f.taskInput(t));
+  t=f.call('peer-1','start',{...f.taskInput(t),leaseID:t.lease.id},{admit:()=>true});
+  const row=f.state.executions.at(-1),stored=f.state.tasks.find(x=>x.id===t.id);
+  row.state='stop-verified';row.stopReceipt={outcome:'failed'};stored.executionState='stopped';
+  assert.throws(()=>f.call('peer-1','reconcile',f.taskInput(t),{stopped:()=>false}),/LEASE_NOT_EXPIRED/);
+  assert.throws(()=>f.call('peer-2','reconcile',f.taskInput(t),{stopped:()=>true}),/LEASE_NOT_EXPIRED/);
+  row.stopReceipt.outcome='success';
+  assert.throws(()=>f.call('peer-1','reconcile',f.taskInput(t),{stopped:()=>true}),/LEASE_NOT_EXPIRED/);
+  row.stopReceipt.outcome='failed';
+  const next=f.call('peer-1','reconcile',f.taskInput(t),{stopped:()=>true});
+  assert.equal(next.status,'READY');assert.equal(next.executionState,'not-started');
+  assert.equal(next.workRevision,t.workRevision+1);assert.equal(next.ownershipGeneration,t.ownershipGeneration+1);
+});
+
+test('Owner task assignment pins claimant and independent reviewer without execution grant',()=>{
+  const f=fixture();f.close();
+  const input={text:'Owner work',dependencies:[],files:['src/a'],requiredCapabilities:['collaboration'],acceptanceCriteria:['Pass'],requiredChecks:['node check.mjs'],assignedPeer:'peer-3',reviewPeer:'peer-4'};
+  assert.throws(()=>f.call('owner','propose',input),/MEMBER/);
+  assert.throws(()=>f.call('owner','propose',{...input,reviewPeer:'peer-3'},{owner:true}),/INDEPENDENT_REVIEW/);
+  assert.throws(()=>f.call('owner','propose',{...input,assignedPeer:'foreign'},{owner:true}),/MEMBER/);
+  assert.throws(()=>f.call('owner','propose',{...input,files:['../escape']},{owner:true}),/PATH/);
+  assert.throws(()=>f.call('owner','propose',{...input,dependencies:['unknown']},{owner:true}),/DEPENDENCY/);
+  let t=f.call('owner','propose',input,{owner:true});assert.equal(t.assignmentSource,'owner');
+  const replay=f.payload(input),copy=structuredClone(f.state);
+  const first=protocolAction(copy,'owner','propose',replay,f.ctx,{owner:true});
+  assert.equal(protocolAction(copy,'owner','propose',replay,f.ctx,{owner:true}).id,first.id);
+  assert.throws(()=>protocolAction(copy,'owner','propose',{...replay,assignedPeer:'peer-2'},f.ctx,{owner:true}),/IDEMPOTENCY_CONFLICT/);
+  t=f.call('peer-1','ready',f.taskInput(t));
+  assert.throws(()=>f.call('peer-1','claim',f.taskInput(t)),/CLAIM_DENIED/);
+  t=f.call('peer-3','claim',f.taskInput(t));assert.equal(t.reviewer,'peer-4');
+  assert.throws(()=>f.call('peer-3','start',{...f.taskInput(t),leaseID:t.lease.id}),/EXECUTION_NOT_AUTHORIZED/);
+  t=f.call('peer-3','release',{...f.taskInput(t),leaseID:t.lease.id});
+  assert.equal(t.assignedPeer,'peer-3');
+  assert.throws(()=>f.call('peer-2','claim',f.taskInput(t)),/CLAIM_DENIED/);
+});
+
 test('all four peers read same bound plan; duplicate, cross-project and version changes',()=>{
   const f=fixture();for(const m of f.state.members)assert.equal(f.call(m.id,'read').plan.digest,f.p.digest);
   assert.equal(ingestPlan(f.state,f.source,f.ctx).version,1);
@@ -59,6 +97,17 @@ test('deterministic claims, CAS, lease expiration and cancellation do not imply 
   t=f.call('peer-3','reconcile',f.taskInput(t),{stopped:()=>true});assert.equal(t.status,'CANCELLED');assert.equal(t.executionState,'stopped');
 });
 
+test('expired completed worker renews submission lease without changing ownership; no stop proof denies',()=>{
+  const f=fixture();let t=f.propose();f.close();t=f.call('peer-1','ready',f.taskInput(t));t=f.call('peer-1','claim',f.taskInput(t));
+  t=f.call('peer-1','start',{...f.taskInput(t),leaseID:t.lease.id},{admit:()=>true});
+  f.state.tasks[0].executionState='stopped';f.now=t.lease.expiresAt+1;
+  const input={...f.taskInput(t),leaseID:t.lease.id};
+  assert.throws(()=>f.call('peer-1','renew',input),/LEASE_INVALID/);
+  assert.throws(()=>f.call('peer-2','renew',input,{stopped:()=>true}),/LEASE_INVALID/);
+  t=f.call('peer-1','renew',input,{stopped:()=>true});
+  assert.equal(t.ownershipGeneration,input.ownershipGeneration);assert.equal(t.lease.expiresAt,f.now+LEASE_MS);assert.equal(t.status,'RUNNING');
+});
+
 test('dependencies gate admission; independent reports and reviewer gate DONE; rework invalidates evidence',()=>{
   const f=fixture();let a=f.propose(),b=f.propose({files:['src/b'],dependencies:[a.id]});f.close();
   a=f.call('peer-1','ready',f.taskInput(a));a=f.call('peer-1','claim',f.taskInput(a));
@@ -74,6 +123,11 @@ test('dependencies gate admission; independent reports and reviewer gate DONE; r
   assert.throws(()=>f.call('peer-1','done',f.taskInput(a)),/INDEPENDENT/);
   assert.throws(()=>f.call('peer-1','review',{...f.taskInput(a),approved:true,reportID:'primary'}),/INDEPENDENT/);
   addReport(a,a.reviewer,'review');
+  const reviewReport=f.state.artifacts.find(x=>x.id==='review');
+  reviewReport.checks=[{command:'team_worktree verify',exitCode:0}];
+  assert.throws(()=>f.call(a.reviewer,'review',{...f.taskInput(a),approved:true,reportID:'review'},{verifyReport:()=>true}),/PROTOCOL_VERIFICATION_REQUIRED: report.commands missing successful required checks \["node check.mjs"\]/);
+  assert.equal(f.state.tasks.find(t=>t.id===a.id).status,'SUBMITTED');
+  reviewReport.checks=[{command:'node check.mjs',exitCode:0}];
   a=f.call(a.reviewer,'review',{...f.taskInput(a),approved:true,reportID:'review'},{verifyReport:()=>true});
   a=f.call(a.reviewer,'integrate',f.taskInput(a),{verifyReport:()=>true});
   a=f.call(a.reviewer,'done',f.taskInput(a),{verifyReport:()=>true});assert.equal(a.status,'DONE');
@@ -112,6 +166,11 @@ test('coordinator persists managed Markdown, validates file scope, concurrent CA
     await assert.rejects(c.ownerPlan({...publication,markdown:undefined,fileID:'../../secret',requestID:'bad',expectedVersion:1,planID:p.planID}),/TEXT|ATTACHMENT/);
     let seq=0;const payload=x=>({requestID:`r${++seq}`,planID:p.planID,planVersion:1,projectID:'project',teamID:'team',canonicalRoot:root,...x});
     const host={sessionID:'ses_1',agent:'build'};
+    const discovered=await c.protocol('read',{},host);
+    assert.equal(discovered.plan.version,1);assert.equal(discovered.policy.executionEnabled,false);
+    assert.deepEqual(discovered.binding,{projectID:'project',teamID:'team',canonicalRoot:root,planID:p.planID,planVersion:1});
+    await assert.rejects(c.protocol('read',{}, {...host,sessionID:'unknown'}),/PILOT_MEMBER_REQUIRED/);
+    await assert.rejects(c.protocol('propose',{},host),/PROTOCOL_/);
     let t=await c.protocol('propose',payload({text:'Work',files:[],dependencies:[],requiredCapabilities:[],acceptanceCriteria:['Pass'],requiredChecks:['check']}),host);
     c.mutate(state=>{state.plans[0].discussionClosed=true;return {};});
     t=await c.protocol('ready',payload({taskID:t.id,taskVersion:t.taskVersion,ownershipGeneration:0}),host);

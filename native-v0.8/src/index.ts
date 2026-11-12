@@ -26,6 +26,7 @@ import {join} from 'node:path'
 import {createHash} from 'node:crypto'
 import {homedir} from 'node:os'
 import {securityView} from './peer-security.mjs'
+import {executionAuthorization} from './host-owner-bridge.mjs'
 
 // Tool schemas accept both legacy specialists and the opt-in flexible worker IDs.
 // Server-side TeamRoom still validates actual room membership and Admin authority.
@@ -71,9 +72,13 @@ export default Plugin.define({
         snapshot:async input=>{
            if((input as {directory:string}).directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
             if(!approvedProject(ctx))throw Error('PILOT_PROJECT_ROOT_REQUIRED')
-          const state=coordinator.read()
+           const stored=coordinator.read()
+           const state=stored?{...stored,executionAuthorization:executionAuthorization(stored)}:stored
           if(!state)return {status:'unprovisioned',reason:'PILOT_PROJECT_NOT_PROVISIONED',members:[],messages:[],tasks:[]}
-           if(state.projectID!==ctx.location.project.id)throw Error('PILOT_RPC_PROJECT_MISMATCH')
+            if(state.projectID!==ctx.location.project.id){
+              if(state.mode!=='peer'||state.isolation!=='read-only'||state.status!=='ready'||state.canonicalRoot!==ctx.location.project.canonical||state.tasks.length||(state.executions??[]).length)throw Error('PILOT_RPC_PROJECT_MISMATCH')
+              return {...teamView(state),migrationRequired:true,migrationProjectID:ctx.location.project.id,reason:'Git đã đổi project ID. Cần Owner xác nhận chuyển team; dữ liệu cũ chưa thay đổi.'}
+            }
             const modelCatalog=publicModels(await ctx.model.list())
           const members=await Promise.all(state.members.map(async(member:any)=>{
             const session=await ctx.session.get({sessionID:member.sessionID})
@@ -89,11 +94,13 @@ export default Plugin.define({
            if((input as {directory:string}).directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
             if(!approvedProject(ctx))return context.error('project_not_ready','Canonical project không hợp lệ.',{})
           // RPC has no Owner principal. Existing teams may be reopened; provisioning needs trusted host setup.
-           if(!coordinator.read()){
+            const upgrading=coordinator.read()?.isolation==='read-only'
+            if(!coordinator.read()||upgrading){
               try{const i=input as any;const plan=peerPlan(i.plan);if(i.generation!==PEER_GENERATION)throw Error('STALE_GENERATION');consumeOwnerGrant(i.authorization,{root:ctx.location.project.canonical,projectID:ctx.location.project.id,operation:'createTeam',generation:i.generation,requestID:i.requestID,planHash:planHash(plan)})}
              catch{return context.error('owner_authorization_required','Cần xác nhận Owner qua hộp thoại Desktop để tạo team. Không tạo session hoặc worktree.',{})}
            }
-           await coordinator.bootstrap((input as any).plan)
+            if(upgrading&&'upgradeWorktrees' in coordinator)await coordinator.upgradeWorktrees()
+            else await coordinator.bootstrap((input as any).plan)
           const state=coordinator.read()
           if(!state)throw Error('PILOT_PROVISION_FAILED')
            const members=await Promise.all(state.members.map(async(member:any)=>{
@@ -108,14 +115,20 @@ export default Plugin.define({
           if(!('directory' in coordinator))throw Error('PILOT_PROJECT_NOT_APPROVED')
           return readReport(coordinator.directory,coordinator.read(),ctx.location.project.id,inp.id)
         },
-        ownerMessage:async input=>{
+        ownerMessage:async (input,context)=>{
+          try{
           const inp=input as {directory:string,recipient:string,text:string,requestID?:string}
            if(inp.directory!==ctx.location.directory)throw Error('PILOT_RPC_LOCATION_MISMATCH')
            const i=input as any
            if(i.generation!==PEER_GENERATION)throw Error('PILOT_OWNER_AUTHORIZATION_REQUIRED')
            consumeOwnerGrant(i.authorization,{root:ctx.location.project.canonical,projectID:ctx.location.project.id,operation:'ownerMessage',generation:i.generation,requestID:i.requestID,planHash:planHash({recipient:i.recipient,text:i.text})})
            const result=await coordinator.ownerSend({recipient:inp.recipient,text:inp.text,requestID:inp.requestID})
-          return {ok:true,message:result}
+           if('dispatchMessages' in coordinator)await coordinator.dispatchMessages()
+           return {ok:true,message:result}
+          }catch(error){
+            const message=error instanceof Error&&/^[A-Z][A-Z0-9_]+$/.test(error.message)?error.message:'PILOT_OWNER_MESSAGE_FAILED'
+            return context.error('owner_message_failed',message,{message})
+          }
         },
         selectModel:async input=>{
           const i=input as any

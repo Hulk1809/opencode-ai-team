@@ -13,7 +13,9 @@ export function reviewPlan(state,input){
   const receipt={id:randomUUID(),requestID:input.requestID,requestHash:hash,planID:plan.planID,planVersion:plan.version,digest:plan.digest,decision:input.decision,authority:'owner-bridge',executionAuthorized:false,at:new Date().toISOString()};
   state.approvals.push(receipt);
   plan.ownerDecision=input.decision;
-  if(input.decision==='approve')plan.needsOwner=false;
+  if(input.decision==='approve'){
+    plan.needsOwner=false;plan.discussionClosed=true;
+  }
   else{
     if(state.executionPolicy&&!state.executionPolicy.revokedAt){state.executionPolicy.revokedAt=Date.now();state.executionPolicy.revokedReason='PLAN_REJECTED';}
     for(const task of state.tasks.filter(t=>t.planID===plan.planID&&t.planVersion===plan.version&&t.executionState==='not-started')){task.status='CANCELLED';task.taskVersion++;task.ownershipGeneration++;}

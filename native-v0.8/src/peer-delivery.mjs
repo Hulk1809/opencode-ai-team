@@ -1,6 +1,17 @@
 import {createHash,randomUUID} from 'node:crypto';
 import {memberID} from './peer-team.mjs';
 
+export function queueMessages(state){
+  if(state?.mode!=='peer'||!state.collaboration?.enabled)return;
+  state.deliveries??=[];
+  for(const message of state.messages){
+    if(!['send','handoff'].includes(message.action)||Date.parse(message.at)<state.collaboration.enabledAt)continue;
+    const mentions=[...message.text.matchAll(/@((?:peer-)[1-9][0-9]*)\b/g)].map(m=>m[1]);
+    const targets=state.members.filter(m=>memberID(m)!==message.from&&(message.to==='team'||message.to===memberID(m)||mentions.includes(memberID(m))));
+    for(const m of targets)if(!state.deliveries.some(d=>d.messageID===message.id&&d.memberID===memberID(m)))state.deliveries.push({messageID:message.id,memberID:memberID(m),sessionID:m.sessionID,promptID:`msg_${createHash('sha256').update(`${state.teamID}:${message.id}:${m.sessionID}`).digest('hex').slice(0,32)}`,status:'queued'});
+  }
+}
+
 // ADAPT: Ensemble durable messages; per-recipient acknowledgement never wakes a model.
 export function inbox(state,member){
   return state.messages.filter(m=>m.to===memberID(member)||m.to==='team').map(m=>({...m,receipt:state.receipts?.find(r=>r.messageID===m.id&&r.memberID===memberID(member))??null}));

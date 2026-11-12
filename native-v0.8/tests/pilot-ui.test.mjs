@@ -1,9 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {checkedTeam,connectionLabel,insertAdminDraft,taskDraft,workflowDraft,messageTime,pilotError,memberActivity} from '../src/pilot-ui.mjs';
+import {checkedTeam,connectionLabel,insertAdminDraft,taskDraft,workflowDraft,messageTime,pilotError,memberActivity,ownerRecipient} from '../src/pilot-ui.mjs';
+
+test('Owner recipient validates peer identity without silently redirecting message',()=>{
+  const pane=readFileSync(new URL('../src/pilot-pane.tsx',import.meta.url),'utf8');
+  assert.match(pane,/aria-pressed=\{recipient\(\)==='team'\} onClick=\{\(\)=>setRecipient\('team'\)\}/);
+  const team={mode:'peer',members:[{id:'peer-1',role:'peer-1'},{role:'peer-2'}]};
+  for(const value of ['team','peer-1','peer-2'])assert.equal(ownerRecipient(team,value),value);
+  for(const value of ['',undefined,'admin','Toàn team'])assert.throws(()=>ownerRecipient(team,value),/PILOT_RECIPIENT_INVALID/);
+  assert.equal(ownerRecipient({mode:'legacy'},'team'),'admin');
+});
 
 test('RPC errors and connection states remain readable and distinct',()=>{
+  assert.equal(pilotError({cause:{reason:'PEER_WORKTREE_CHECK_FORBIDDEN'}}),'PEER_WORKTREE_CHECK_FORBIDDEN');
+  assert.equal(pilotError({issues:[{message:'bad task'},{code:'INVALID_BINDING'}]}),'bad task; INVALID_BINDING');
   assert.equal(pilotError({error:{data:{message:'PILOT_RPC_LOCATION_MISMATCH'}}}),'PILOT_RPC_LOCATION_MISMATCH');
   assert.equal(pilotError(new Error('Host unavailable')),'Host unavailable');
   const cycle={};cycle.cause=cycle;
@@ -73,6 +84,9 @@ test('UI wiring retains snapshot-only RPC, bounded messages and native host acti
   assert.match(pane,/Tạo Peer Team \(4 AI\)/);assert.doesNotMatch(pane,/disabled=\{[^}]*PILOT_GIT_PROJECT_REQUIRED/);
   const server=readFileSync(new URL('../src/index.ts',import.meta.url),'utf8');
   assert.match(server,/context.error\('owner_authorization_required'/);
+  assert.match(server,/context.error\('owner_message_failed',message,\{message\}\)/);
+  assert.match(rpc,/owner_message_failed:/);
+  assert.equal(pilotError({type:'owner_message_failed',data:{message:'PILOT_OWNER_GRANT_INVALID'}}),'PILOT_OWNER_GRANT_INVALID');
   assert.doesNotMatch(server,/ctx.session.active\(/);
   const gui=readFileSync(new URL('../src/gui.tsx',import.meta.url),'utf8');
   assert.match(gui,/pilot-pane.css\?inline/);assert.match(gui,/ctx.add\(Style,style\+chatStyle\+pilotStyle\)/);

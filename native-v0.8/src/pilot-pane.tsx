@@ -3,7 +3,7 @@ import {createEffect,createMemo,createSignal,For,onCleanup,onMount,Show} from 's
 import {PilotRPC} from './pilot-rpc'
 import {PilotOwner} from './pilot-owner-ipc'
 import {openAdminChat} from './pilot-admin-chat.mjs'
-import {checkedTeam,connectionLabel,insertAdminDraft,memberActivity,messageTime,pilotError,taskDraft,workflowDraft} from './pilot-ui.mjs'
+import {checkedTeam,connectionLabel,insertAdminDraft,memberActivity,messageTime,pilotError,ownerRecipient,taskDraft,workflowDraft} from './pilot-ui.mjs'
 import {PeerModelSelector,PilotRouting} from './pilot-routing'
 import {memberLabel,PEER_GENERATION} from './peer-team.mjs'
 import {memberTasks,taskActive,taskDone,taskState,taskProgress,uniqueMessages} from './peer-presentation.mjs'
@@ -48,11 +48,37 @@ export function PilotPane(){
   let pendingSend:{key:string,text:string,recipient:string,requestID:string}|undefined
   const [planSource,setPlanSource]=createSignal('text'),[planBody,setPlanBody]=createSignal(''),[planCriteria,setPlanCriteria]=createSignal(''),[scopeRef,setScopeRef]=createSignal('')
   let pendingPlan:{key:string,body:string,requestID:string}|undefined
+  const [taskPeer,setTaskPeer]=createSignal(''),[taskReviewer,setTaskReviewer]=createSignal(''),[taskFiles,setTaskFiles]=createSignal(''),[taskCriteria,setTaskCriteria]=createSignal(''),[taskChecks,setTaskChecks]=createSignal(''),[taskDeps,setTaskDeps]=createSignal<string[]>([])
+  let pendingTask:{key:string,body:string,requestID:string}|undefined
+  const lines=(text:string)=>text.split('\n').map(s=>s.trim()).filter(Boolean)
+  async function createTask(){
+    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||!valid()||sending())return
+    const body=JSON.stringify({operation:'createTask',projectID:team().projectID,teamID:team().teamID,canonicalRoot:c.directory,planID:p.planID,planVersion:p.version,text:task().trim(),dependencies:taskDeps(),files:lines(taskFiles()),requiredCapabilities:['collaboration'],acceptanceCriteria:lines(taskCriteria()),requiredChecks:lines(taskChecks()),...(taskPeer().trim()?{assignedPeer:taskPeer().trim().replace(/^@/,'')}:{ }),...(taskReviewer()?{reviewPeer:taskReviewer()}:{})})
+    if(pendingTask?.key!==key||pendingTask.body!==body)pendingTask={key,body,requestID:crypto.randomUUID()}
+    setSending(true);setError('')
+    try{
+      await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({...JSON.parse(body),requestID:pendingTask.requestID})})
+      pendingTask=undefined
+      if(currentKey()===key){setTask('');setNotice('Đã tạo task; phân công không cấp quyền thực thi.');await refresh()}
+    }catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
+  }
 
   async function cancelExecution(record:any){
     const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||sending())return
     setSending(true);setError('')
     try{await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'cancelExecution',requestID:crypto.randomUUID(),executionID:record.id,identity:record.identity})});if(currentKey()===key)await refresh()}
+    catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
+  }
+  async function toggleCollaboration(){
+    const c=ctx.sessions.current(),key=currentKey();if(!c||!valid()||sending())return
+    setSending(true);setError('')
+    try{await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'collaboration',requestID:crypto.randomUUID(),enabled:!team()?.collaboration?.enabled})});if(currentKey()===key)await refresh()}
+    catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
+  }
+  async function closeDiscussion(){
+    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||sending())return
+    setSending(true);setError('')
+    try{await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'closeDiscussion',requestID:crypto.randomUUID(),planID:p.planID,planVersion:p.version,digest:p.digest})});if(currentKey()===key)await refresh()}
     catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
   }
   async function reviewSharedPlan(decision:'approve'|'reject'){
@@ -124,7 +150,7 @@ export function PilotPane(){
     return {todo,doing,review,done:doneList}
   })
 
-  createEffect(()=>{currentKey();sequence++;reportRequest++;setReportLoading(false);setRecipient('team');pendingSend=undefined;setDraft('');setTask('');setFile('');setPlanBody('');setPlanCriteria('');setScopeRef('');pendingPlan=undefined;setFilter('');setLimit(100);setNotice('');setError('');setReport(undefined);setSelectedPeerID(null);previousMessages=[];setUnread(0);setAtBottom(true);queueMicrotask(()=>void refresh())})
+  createEffect(()=>{currentKey();sequence++;reportRequest++;setReportLoading(false);setRecipient('team');pendingSend=undefined;setDraft('');setTask('');setTaskPeer('');setTaskReviewer('');setTaskFiles('');setTaskCriteria('');setTaskChecks('');setTaskDeps([]);pendingTask=undefined;setFile('');setPlanBody('');setPlanCriteria('');setScopeRef('');pendingPlan=undefined;setFilter('');setLimit(100);setNotice('');setError('');setReport(undefined);setSelectedPeerID(null);previousMessages=[];setUnread(0);setAtBottom(true);queueMicrotask(()=>void refresh())})
   async function refresh(){
     if(busy||disposed)return
     const current=ctx.sessions.current(),request=++sequence
@@ -149,10 +175,11 @@ export function PilotPane(){
   async function handleCreateTeam(){
     const current=ctx.sessions.current()
     if(!current){setError('Mở session trước.');return}
-     setCreating(true);setError('');setNotice('Đang khởi tạo Peer Team…')
+      const upgrading=team()?.isolation==='read-only'
+      setCreating(true);setError('');setNotice(upgrading?'Đang chuyển team sang Git worktree…':'Đang khởi tạo Peer Team…')
     try{
       await ctx.main(PilotOwner).authorizeCreate({sessionID:current.id,directory:current.directory})
-      setNotice('Đã tạo AI Team thành công!')
+      setNotice(upgrading?'Đã chuyển team sang Git worktree; giữ plan/chat/model. Chưa gửi prompt hoặc cấp execution.':'Đã tạo AI Team; chưa gửi prompt hoặc cấp execution.')
       await refresh()
     }catch(e){
       setError(pilotError(e))
@@ -167,20 +194,30 @@ export function PilotPane(){
     if(!current||!valid()){setError('Chọn project trước.');return}
     if(!draft().trim()){setError('Nhập nội dung tin nhắn.');return}
     setSending(true);setError('');setNotice('')
-    const key=currentKey(),text=draft().trim(),to=team()?.mode==='peer'?recipient():'admin'
+    let to:string
+    try{to=ownerRecipient(team(),recipient())}catch(e){setSending(false);setError(pilotError(e));return}
+    const key=currentKey(),text=draft().trim()
     if(pendingSend?.key!==key||pendingSend?.text!==text||pendingSend?.recipient!==to)pendingSend={key,text,recipient:to,requestID:crypto.randomUUID()}
     try{
       await ctx.main(PilotOwner).send({sessionID:current.id,directory:current.directory,recipient:to,text,requestID:pendingSend!.requestID})
       pendingSend=undefined
       if(currentKey()!==key)return
       if(draft().trim()===text)setDraft('')
-      setNotice('Đã lưu Owner message qua coordinator; chưa chạy model.')
+      setNotice(team()?.collaboration?.enabled?'Đã lưu và xử lý hàng đợi gửi session; xem trạng thái giao nhận.':'Đã lưu; phối hợp tự động đang tắt, chưa gửi session.')
       await refresh()
     }catch(e){
       if(currentKey()===key)setError(pilotError(e))
     }finally{
       setSending(false)
     }
+  }
+  async function toggleExecution(refreshGrant=false){
+    const c=ctx.sessions.current(),p=latestPlan(),key=currentKey();if(!c||!p||sending())return
+    setSending(true);setError('')
+    try{
+      await ctx.main(PilotOwner).publishPlan({sessionID:c.id,directory:c.directory,planJSON:JSON.stringify({operation:'execution',requestID:crypto.randomUUID(),planID:p.planID,planVersion:p.version,digest:p.digest,...(!refreshGrant&&team()?.executionPolicy&&!team()?.executionPolicy?.revokedAt?{revoke:true}:{policy:{maxActive:4,maxAttemptsPerTask:5,maxCalls:40,timeoutMs:900000,models:team().members.map((m:any)=>m.modelDefault)}})})})
+      if(currentKey()===key)await refresh()
+    }catch(e){if(currentKey()===key)setError(pilotError(e))}finally{setSending(false)}
   }
   function openFile(){act(()=>{
     const current=ctx.sessions.current(),screen=ctx.screen.current()
@@ -202,6 +239,7 @@ export function PilotPane(){
           Project: {team()?.canonicalRoot?.split('/').at(-1)??ctx.sessions.current()?.project?.name??ctx.sessions.current()?.directory?.split('/').at(-1)??'Chưa chọn'}
         </button>
         <Show when={team()}>
+          <button type="button" disabled={sending()} onClick={toggleCollaboration}>{team()?.collaboration?.enabled?'Tạm dừng phối hợp':'Bật phối hợp tự động'}</button>
           <span class={`b31-pill ${latestPlan()?.ownerDecision==='approve'?'is-approved':latestPlan()?.ownerDecision==='reject'?'is-blocked':'is-pending'}`} title="Trạng thái Shared Plan">
             PLAN v{latestPlan()?.version??0} {latestPlan()?.ownerDecision==='approve'?'APPROVED':(latestPlan()?.ownerDecision??'PENDING').toUpperCase()}
           </span>
@@ -209,8 +247,10 @@ export function PilotPane(){
           <span class="b31-pill" title="Nguồn: session.active() & task graph">
             {runningPeers()} Running · {done()}/{team().tasks.length} Done
           </span>
-          <span class="b31-pill is-blocked" title="nativeDispatch=false; live execution gated">
-            Execution: BLOCKED
+          <button type="button" disabled={sending()||latestPlan()?.ownerDecision!=='approve'} onClick={()=>toggleExecution()}>{team()?.executionPolicy&&!team()?.executionPolicy?.revokedAt?'Thu hồi execution':'Cấp quyền execution'}</button>
+          <Show when={team()?.executionPolicy}><button type="button" disabled={sending()} onClick={()=>toggleExecution(true)}>Ký lại execution</button></Show>
+          <span class="b31-pill" title="Scoped worktree execution; native edit/shell remain denied">
+             Execution: {team()?.executionAuthorization?.authorized===true?'WORKTREE AUTHORIZED':`BLOCKED · ${team()?.executionAuthorization?.reason??'Chưa xác minh quyền'}`}
           </span>
         </Show>
       </div>
@@ -221,15 +261,16 @@ export function PilotPane(){
           <button type="button" class="b31-btn-ghost" aria-pressed={showOverview()} onClick={()=>setShowOverview(v=>!v)}>Overview</button>
         </Show>
         <button type="button" class="b31-btn-ghost" onClick={()=>act(()=>ctx.layout.settings())}>Settings</button>
-        <button type="button" class="b31-btn-ghost" disabled={loading()} onClick={()=>void refresh()}>Làm mới</button>
+        <Show when={team()?.mode==='peer'&&team()?.isolation==='read-only'}><button type="button" class="b31-btn-ghost" disabled={creating()} onClick={handleCreateTeam}>Chuyển sang Git worktree</button></Show>
+        <button type="button" class="b31-btn-ghost" title="Chỉ đọc lại trạng thái; không tạo worktree hoặc gửi prompt" disabled={loading()} onClick={()=>void refresh()}>Làm mới</button>
       </div>
     </header>
 
     <p class="pilot-safety b31-safety-bar">
-      <span>nativeDispatch=false không thay đổi · Panel không gửi prompt; Owner tự gửi trong native chat · {team()?.isolation??'worktree + bwrap-v1'} · Gen: {team()?.runtime?.generation??PEER_GENERATION}</span>
+      <span>Chat session: {team()?.collaboration?.enabled?'BẬT':'TẠM DỪNG'} · Quyền thực thi code tách riêng · {team()?.isolation??'worktree + bwrap-v1'} · Gen: {team()?.runtime?.generation??PEER_GENERATION}</span>
     </p>
 
-    <Show when={error()}><p role="alert" class="pilot-error b31-banner-error">{error()}</p></Show>
+    <Show when={error()}><div role="alert" class="pilot-error b31-banner-error"><p>{actionError()?'Thao tác thất bại: ':'Đọc trạng thái thất bại: '}{error()}</p><Show when={actionError()}><button type="button" onClick={()=>setError('')}>Đóng lỗi thao tác</button></Show></div></Show>
     <Show when={notice()}><p role="status" class="b31-banner-notice">{notice()}</p></Show>
     <Show when={loading()&&!team()}><p role="status" class="b31-loading">Đang tải team…</p></Show>
 
@@ -258,7 +299,7 @@ export function PilotPane(){
             const current=()=>tasks().find(taskActive)
             const doneCount=()=>tasks().filter(taskDone).length
             const totalCount=()=>tasks().length
-            const sel=()=>m.model?.selection??m.modelPreference??m.modelDefault
+            const sel=()=>m.model?.selection??m.modelPreference?.observed??m.modelDefault
             const isSelected=()=>selectedPeerID()===peerKey()
             const actState=()=>m.activity??'unavailable'
             const curTaskState=()=>current()?taskState(current()):null
@@ -385,7 +426,7 @@ export function PilotPane(){
             <div class="pilot-section-head b31-chat-subhead">
               <div>
                 <h3>Team Chat</h3>
-                <small class="pilot-muted">Nhóm thảo luận {team().members.length} Peers & Owner · Dispatch tắt (lưu điều phối an toàn)</small>
+                <small class="pilot-muted">Nhóm thảo luận {team().members.length} Peers & Owner · {team()?.collaboration?.enabled?'Gửi prompt qua native queue':'Chỉ lưu tin, chưa gửi session'}</small>
               </div>
               <div class="b31-chat-subactions">
                 <button type="button" class="b31-btn-ghost" onClick={()=>act(()=>{setDraft(team().mode==='peer'?`${draft()}\n\nPlan: [mục tiêu]\nPhạm vi: [được phép]\nTiêu chí nghiệm thu: [checks]\nPeers đề xuất, tự nhận task và review chéo. Không cấp quyền execution.`:workflowDraft(draft()));setNotice('Đã thêm mẫu bàn giao vào bản nháp. Chưa gửi hoặc cấp quyền chạy.');})}>
@@ -478,13 +519,11 @@ export function PilotPane(){
             <div class="pilot-composer b31-chat-composer">
               <div class="b31-composer-toolbar">
                 <Show when={team().mode==='peer'}>
-                  <label class="b31-recipient-select">
+                  <div class="b31-recipient-select" role="group" aria-label="Người nhận">
                     <span>Người nhận:</span>
-                    <select value={recipient()} onChange={e=>setRecipient(e.currentTarget.value)}>
-                      <option value="team">Toàn team</option>
-                      <For each={team().members}>{(m:any)=><option value={m.id}>{memberLabel(m)}</option>}</For>
-                    </select>
-                  </label>
+                    <button type="button" aria-pressed={recipient()==='team'} onClick={()=>setRecipient('team')}>Toàn team</button>
+                    <For each={team().members}>{(m:any)=><button type="button" aria-pressed={recipient()===(m.id??m.role)} onClick={()=>setRecipient(m.id??m.role)}>{memberLabel(m)}</button>}</For>
+                  </div>
                 </Show>
                 <div class="b31-mention-chips">
                   <For each={team().members}>{(m:any)=><button type="button" class="b31-chip-btn" onClick={()=>setDraft(v=>`${v}${v?' ':''}@${m.role} `)}>@{m.role}</button>}</For>
@@ -511,12 +550,32 @@ export function PilotPane(){
               </div>
               <div class="pilot-section-head b31-composer-foot">
                 <small>Draft · {draft().length}/10000 ký tự · Enter để gửi, Shift+Enter xuống dòng</small>
-                <small class="pilot-muted">Owner xác thực qua host IPC · Mention không tự chạy model</small>
+                <small class="pilot-muted">Owner xác thực qua host IPC · Tag gọi model khi phối hợp bật · Tạm dừng không hủy prompt đã nhận</small>
               </div>
             </div>
           </Show>
 
           {/* TAB 2: TASKS BOARD (20% Beads — Compact 4-Column Kanban + Dependencies & Progress) */}
+          <Show when={team()?.deliveries?.length}>
+            <details><summary>Trạng thái giao nhận session ({team().deliveries.length})</summary><For each={team().deliveries}>{(d:any)=><p>{peerDisplay(d.memberID,team().members)} · {d.status} · {d.messageID}{d.error?` · ${d.error}`:''}</p>}</For></details>
+          </Show>
+          <Show when={(activeTab()==='tasks'||activeTab()==='plan')&&latestPlan()}>
+            <details class="b31-plan-editor">
+              <summary>Tạo task / giao việc cho Peer</summary>
+              <div class="b31-form-stack">
+                <label>Nội dung task<textarea rows={3} maxLength={10000} value={task()} onInput={e=>setTask(e.currentTarget.value)}/></label>
+                <label>Người làm · chọn hoặc gõ @peer<input list="pilot-task-peers" value={taskPeer()} placeholder="Để Peer tự nhận" onInput={e=>setTaskPeer(e.currentTarget.value)}/></label>
+                <datalist id="pilot-task-peers"><For each={team().members}>{(m:any)=><option value={`@${m.id??m.role}`}>{memberLabel(m)}</option>}</For></datalist>
+                <label>Người review<select value={taskReviewer()} onChange={e=>setTaskReviewer(e.currentTarget.value)}><option value="">Tự chọn reviewer độc lập</option><For each={team().members}>{(m:any)=><option value={m.id??m.role}>{memberLabel(m)}</option>}</For></select></label>
+                <fieldset><legend>Task phụ thuộc</legend><For each={team().tasks.filter((t:any)=>t.planID===latestPlan().planID&&t.planVersion===latestPlan().version)}>{(t:any)=><label><input type="checkbox" checked={taskDeps().includes(t.id)} onChange={e=>setTaskDeps(ids=>e.currentTarget.checked?[...ids,t.id]:ids.filter(id=>id!==t.id))}/>{t.text}</label>}</For></fieldset>
+                <label>Phạm vi file · mỗi dòng một path tương đối<textarea rows={2} value={taskFiles()} onInput={e=>setTaskFiles(e.currentTarget.value)}/></label>
+                <label>Tiêu chí nghiệm thu · mỗi dòng một mục<textarea rows={2} value={taskCriteria()} onInput={e=>setTaskCriteria(e.currentTarget.value)}/></label>
+                <label>Lệnh kiểm tra · mỗi dòng một lệnh<textarea rows={2} value={taskChecks()} onInput={e=>setTaskChecks(e.currentTarget.value)}/></label>
+                <small>Task mới ở DRAFT. Phạm vi file trùng bị chặn khi nhận việc. Không chạy lệnh hoặc gọi model.</small>
+                <button type="button" disabled={sending()||!task().trim()||!taskCriteria().trim()||!taskChecks().trim()} onClick={createTask}>Owner: Tạo và phân công task</button>
+              </div>
+            </details>
+          </Show>
           <Show when={activeTab()==='tasks'}>
             <section class="b31-tab-panel" aria-label="Plan Board">
               <div class="pilot-section-head">
@@ -558,8 +617,8 @@ export function PilotPane(){
                           </div>
                           <strong class="b31-task-title">{t.text.replace(/^\[TEST_FIXTURE\]\s*/,'')}</strong>
                           <div class="b31-task-meta">
-                            <span>Assignee: <b>{peerDisplay(t.assignee,team().members)}</b></span>
-                            <span>Reviewer: <b>{t.reviewer?peerDisplay(t.reviewer,team().members):'Chưa phân công'}</b></span>
+                            <span>Assignee: <b>{peerDisplay(t.assignedPeer??t.assignee,team().members)}</b>{t.assignmentSource==='owner'?' · Owner giao':''}</span>
+                            <span>Reviewer: <b>{(t.reviewer??t.reviewPeer)?peerDisplay(t.reviewer??t.reviewPeer,team().members):'Chưa phân công'}</b></span>
                           </div>
                           <div class="b31-task-deps">
                             <small>Deps: {(t.dependencies??[]).length?(t.dependencies??[]).map((d:string)=>d.slice(0,10)).join(', '):'Không có'}</small>
@@ -587,6 +646,7 @@ export function PilotPane(){
               <div class="pilot-section-head">
                 <div>
                   <h3>PLAN.md — Version {latestPlan()?.version??0}</h3>
+                  <Show when={latestPlan()?.ownerDecision==='approve'&&!latestPlan()?.discussionClosed}><button type="button" disabled={sending()} onClick={closeDiscussion}>Owner: Chốt thảo luận</button></Show>
                   <small class="pilot-muted">
                     Owner decision: {(latestPlan()?.ownerDecision??'PENDING').toUpperCase()} · Execution Authorized: false (Live execution BLOCKED)
                   </small>
@@ -796,7 +856,7 @@ export function PilotPane(){
 
             <div class="b31-overview-card">
               <strong>Worktrees & Security</strong>
-              <small class="pilot-muted">Containment: {team().isolation??'worktree'} · Execution: BLOCKED</small>
+               <small class="pilot-muted">Containment: {team().isolation??'worktree'} · Execution: {team()?.executionAuthorization?.authorized===true?'WORKTREE AUTHORIZED':'BLOCKED'}</small>
               <For each={team().members}>{(m:any)=><div class="b31-mini-row">
                 <span>{memberLabel(m)}</span>
                 <code class="pilot-truncate">{m.branch??'non-git'}</code>

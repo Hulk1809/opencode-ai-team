@@ -32,16 +32,23 @@ export function workflowDraft(text='') {
 export function pilotError(error) {
   const seen = new Set();
   function message(value) {
-    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'string') return value.trim()==='[object Object]'?'':value.trim();
     if (!value || typeof value !== 'object' || seen.has(value)) return '';
     seen.add(value);
-    for (const key of ['message', 'error', 'data', 'cause']) {
+    for (const key of ['message', 'error', 'data', 'cause', 'defect', 'reason', 'description', 'detail', 'issues']) {
       const text = message(value[key]);
       if (text) return text;
     }
-    return typeof value.type === 'string' ? value.type : '';
+    if(Array.isArray(value))return value.map(message).filter(Boolean).join('; ');
+    return typeof value.code === 'string' ? value.code : typeof value._tag === 'string' ? value._tag : typeof value.type === 'string' ? value.type : '';
   }
-  return message(error) || 'Không đọc được phản hồi RPC. Kiểm tra project và kết nối host, rồi thử Làm mới.';
+  return (message(error) || 'RPC không trả thông báo lỗi; chưa xác định nguyên nhân.').slice(0,2000);
+}
+
+export function ownerRecipient(team,recipient){
+  if(team?.mode!=='peer')return 'admin';
+  if(recipient==='team'||team.members.some(m=>(m.id??m.role)===recipient))return recipient;
+  throw Error('PILOT_RECIPIENT_INVALID: Chọn lại người nhận trước khi gửi.');
 }
 
 export function connectionLabel({selected, loading, error, status}) {

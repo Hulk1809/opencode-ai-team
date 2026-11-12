@@ -28,7 +28,7 @@ test('B3.1 UI implements 4-peer strip, Zalo/Messenger chat, tabs, CAS model sele
     'b31-kanban-grid',
     'b31-overview-panel',
     'TEST_FIXTURE (Controlled Verification)',
-    'Execution: BLOCKED'
+    'WORKTREE AUTHORIZED'
   ]){
     assert.ok(pane.includes(token),`missing token in pilot-pane.tsx: ${token}`);
   }

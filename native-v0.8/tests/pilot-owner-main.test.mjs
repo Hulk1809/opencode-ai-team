@@ -16,7 +16,7 @@ function bridge(change=()=>{},response=1){
   const ctx={windows:{get:()=>window},serverEndpoints:{get:()=>endpoint},
     client:{session:{get:async()=>({id:'session',projectID:'project',location:{directory:root}})},
       project:{list:async()=>[{id:'project',canonical:root}]},
-      rpc:()=>({createTeam:async(input,options)=>calls.push({input,options}),ownerPlan:async(input,options)=>calls.push({input,options})})},
+       rpc:()=>({snapshot:async()=>({}),createTeam:async(input,options)=>calls.push({input,options}),ownerPlan:async(input,options)=>calls.push({input,options})})},
     provide:(_,value)=>{impl=value}};
   const modules={electron:{dialog:{showMessageBox:async()=>{await change({ctx,controller,endpoint});return {response}}}},
     'node:fs':{realpathSync:p=>p},'node:crypto':crypto,'./peer-team.mjs':peers,'./pilot-models.mjs':pilotModels,'./pilot-owner-ipc':{PilotOwner:{}},'./pilot-rpc':{PilotRPC:{}}};
@@ -73,7 +73,7 @@ test('concurrent same-window confirmation cannot issue duplicate grants',async()
   const first=value.run();
   await assert.rejects(value.run(),/PILOT_OWNER_WINDOW_REQUIRED/);
   // Let main-owned project reads reach native confirmation without timers.
-  for(let i=0;i<10&&!release;i++)await Promise.resolve();
+   for(let i=0;i<20&&!release;i++)await Promise.resolve();
   assert.ok(release);release();
   assert.equal(await first,true);assert.equal(value.issued(),1);
 });

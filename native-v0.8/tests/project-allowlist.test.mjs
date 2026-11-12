@@ -29,10 +29,10 @@ test('approved canonical repo duplicate load, project switch and restart create 
   const repo=join(base,'repo');
   execFileSync('git',['clone','--no-hardlinks',APPROVED_PROJECT,repo],{stdio:'pipe'});
   let sessions=0,worktrees=0;
-  const native=new Map();
+  const native=new Map(),tools=[];
   const ctx={location:{directory:repo,project:{canonical:repo,id:'approved'}},
     options:{pilotStore:join(base,'store'),pilotWake:false,nativeDispatch:false},
-    tool:{transform:async()=>{}},
+    tool:{transform:async fn=>fn({add:tool=>tools.push(tool),list:()=>[]})},
     model:{list:async()=>Object.values(DEFAULT_MODELS).map(m=>({...m,enabled:true,status:'active',variants:[{id:'medium'}]}))},
     session:{get:async({sessionID})=>native.get(sessionID),create:async input=>{sessions++;const s={id:`ses_test${sessions}`,projectID:'approved',agent:'build',location:input.location,model:input.model};native.set(s.id,s);return s;}},
     worktree:{create:async()=>{
@@ -42,6 +42,8 @@ test('approved canonical repo duplicate load, project switch and restart create 
     }}};
   try{
     const [first]=await Promise.all([registerOfficialCoordinator(ctx),registerOfficialCoordinator(ctx)]);
+    const payload=tools.find(t=>t.name==='protocol').input.properties.payload;
+    assert.equal(payload.additionalProperties,false);assert.equal(payload.properties.reportID.type,'string');assert.equal(payload.properties.approved.type,'boolean');assert.equal(payload.properties.reason,undefined);
     assert.equal(first.read(),null);assert.equal(sessions,0);assert.equal(worktrees,0);
     await first.bootstrap();
     assert.equal(first.read().status,'ready');assert.equal(sessions,4);assert.equal(worktrees,4);

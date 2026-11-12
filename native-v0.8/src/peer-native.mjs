@@ -14,6 +14,14 @@ function hasContextActiveWork(rows){
   if(!Array.isArray(rows))return false;
   return rows.some(r=>(r?.type==='shell'&&r.status==='running')||(r?.type==='compaction'&&r.status==='running')||(r?.type==='assistant'&&Array.isArray(r.content)&&r.content.some(p=>p?.type==='tool'&&['streaming','running'].includes(p.state?.status))));
 }
+export async function sessionActivity(ctx,sessionID){
+  if(typeof ctx.session.active==='function')return ctx.session.active();
+  const rows=await ctx.session.context({sessionID});
+  if(!Array.isArray(rows))throw Error('PEER_NATIVE_CONTEXT_INVALID');
+  const last=rows.at(-1);
+  // No active() in server plugin API. Unknown/queued context never proves idle.
+  return {[sessionID]:hasContextActiveWork(rows)||last?.type!=='idle'};
+}
 export function hasVerifiedStop(state,task){
   if(!state||!task)return false;
   const id=JSON.stringify(executionIdentity(state,task));
@@ -28,7 +36,7 @@ export async function observeExecution(coordinator,executionID){
   let observation='unknown';
   try{
     const session=await coordinator.ctx.session.get({sessionID:member.sessionID});verifyNativeBinding(state,member,session);
-    const active=await coordinator.ctx.session.active();
+    const active=await sessionActivity(coordinator.ctx,member.sessionID);
     const contextBusy=typeof coordinator.ctx.session.context==='function'&&hasContextActiveWork(await coordinator.ctx.session.context({sessionID:member.sessionID}));
     if(active[member.sessionID]||contextBusy)observation='running';
     // ponytail: terminal readback is observation only; no trusted provider stop contract yet.
@@ -76,7 +84,7 @@ export async function verifyExecutionStop(coordinator,executionID,adapter){
   let session,active;
   try{
     session=await coordinator.ctx.session.get({sessionID:row.sessionID});verifyNativeBinding(state,member,session);
-    active=await coordinator.ctx.session.active();
+    active=await sessionActivity(coordinator.ctx,row.sessionID);
     const rows=typeof coordinator.ctx.session.context==='function'?await coordinator.ctx.session.context({sessionID:row.sessionID}):null;
     const contextBusy=hasContextActiveWork(rows);
     const unsubmitted=session.outcome==null&&Array.isArray(rows)&&row.submission&&row.submission.state!=='admitted'&&!rows.some(r=>r?.type==='user'&&r.id===row.submission.id);

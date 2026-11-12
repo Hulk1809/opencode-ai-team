@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {executionIdentity,verifyNativeBinding,requestCancellation,verifyExecutionStop} from './peer-native.mjs';
+import {executionIdentity,verifyNativeBinding,requestCancellation,verifyExecutionStop,sessionActivity} from './peer-native.mjs';
 import {sameModel} from './model-routing.mjs';
 import {verifyHostOwnerPolicy} from './host-owner-bridge.mjs';
 
@@ -53,7 +53,7 @@ export class NativePeerAdapter {
     if(row.submission)return structuredClone(row);
     const session=await c.ctx.session.get({sessionID:member.sessionID});
     verifyNativeBinding(state,member,session);
-    const active=await c.ctx.session.active();
+    const active=await sessionActivity(c.ctx,member.sessionID);
     if(!active||typeof active!=='object'||Array.isArray(active)||active[member.sessionID])fail('PEER_NATIVE_SESSION_BUSY');
     const intent=c.mutate(current=>{
       const {row,task,member,plan}=bound(current,executionID);
@@ -122,7 +122,7 @@ export class NativePeerAdapter {
     if(row.stopReceipt?.receiptID)return {stopped:true,executionID:row.id,identity:structuredClone(row.identity),receiptID:row.stopReceipt.receiptID};
     const session=host?.session??await c.ctx.session.get({sessionID:member.sessionID});
     verifyNativeBinding(state,member,session);
-    const active=host?.active??await c.ctx.session.active();
+    const active=host?.active??await sessionActivity(c.ctx,member.sessionID);
     if(!active||typeof active!=='object'||Array.isArray(active)||active[row.sessionID])fail('PEER_STOP_NOT_PROVEN');
     if(!row.submission)return {stopped:true,executionID:row.id,identity:structuredClone(row.identity),receiptID:`stop:${row.id}:not-dispatched`};
     const current=await this.reconcile(row.id);

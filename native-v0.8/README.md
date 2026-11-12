@@ -4,6 +4,15 @@ Plugin điều phối đội ngũ AI đa tác tử (4-Peer Git Worktree Collabor
 
 ---
 
+## Trạng thái mã nguồn — 2026-11-12
+
+**Bản phát triển, chưa hoàn tất kiểm chứng toàn luồng.** Plugin local đã cập nhật; A và C đã `DONE` qua review độc lập và tích hợp canonical. Bộ kiểm thử plugin gần nhất: **281/281 đạt**, build đạt.
+
+- Đã sửa: xác minh grant trước khi UI báo quyền, giữ budget khi ký lại, chọn người nhận Owner, delivery tới 4 Peer, phục hồi attempt thất bại có stop proof, chạy browser/keyboard/375px trong sandbox và thông báo report thiếu required checks.
+- Còn: B cũ thiếu stop proof; B/I/R chưa hoàn tất; lifecycle verify-only cho `files=[]`, E2E cuối/ảnh bằng chứng và kiểm chứng live revoke/reload/refresh/rework chưa đủ.
+- `maxCalls` đếm số lần `start` execution, không giới hạn chat. Không coi delivery `sent` hay unit tests là bằng chứng toàn workflow hoàn tất.
+- Bằng chứng chi tiết: [Desktop recovery](docs/recovery-live-2026-11-12.md), [browser runner](docs/browser-runner-live-2026-11-11.md), [integration](docs/integration-live-2026-11-11.md).
+
 ## 1. Phân tích Kiến trúc & Mã nguồn (`src/`)
 
 Dự án được thiết kế theo mô hình **Defense-in-Depth (Phòng thủ nhiều lớp)** với ranh giới quyền hạn tách biệt giữa **Electron Main (Owner Authority)**, **Sidecar Plugin Coordinator**, và **Bubblewrap Worker Sandbox (`bwrap-v1`)**.

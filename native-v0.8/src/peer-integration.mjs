@@ -55,8 +55,8 @@ export async function integrateReviewedTask(coordinator,input,authority){
   if(dirname(input.directory)!==parent||realpathSync(parent)!==parent||input.directory.includes('\0'))throw Error('PEER_INTEGRATION_WORKSPACE_INVALID');
   const primary=state.members.find(m=>m.id===task.assignee);
   if(!primary?.branch||git(primary.directory,'symbolic-ref','--short','HEAD')!==primary.branch||git(primary.directory,'rev-parse','HEAD')!==input.sourceCommit||git(primary.directory,'status','--porcelain')||git(root,'rev-parse','HEAD')!==input.baseCommit)throw Error('PEER_INTEGRATION_COMMIT_INVALID');
-  git(root,'merge-base',input.baseCommit,input.sourceCommit);
-  const sourceDiff=git(root,'diff','--name-only',input.baseCommit,input.sourceCommit).split('\n').filter(Boolean);
+  const common=git(root,'merge-base',input.baseCommit,input.sourceCommit);
+  const sourceDiff=git(root,'diff','--name-only',common,input.sourceCommit).split('\n').filter(Boolean);
   if(!sourceDiff.length||sourceDiff.some(p=>!task.files.some(f=>p===f||p.startsWith(f+'/'))))throw Error('PEER_INTEGRATION_SCOPE_INVALID');
   for(const commit of [input.baseCommit,input.sourceCommit])if(git(root,'rev-parse',`${commit}^{commit}`)!==commit)throw Error('PEER_INTEGRATION_COMMIT_INVALID');
   const sourceTree=git(primary.directory,'rev-parse',`${input.sourceCommit}^{tree}`);

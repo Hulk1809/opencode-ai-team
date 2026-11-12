@@ -342,7 +342,7 @@ const definition=Plugin.define({
         hostVersion:ctx.app.version,
         getWindow:(id:number)=>ctx.windows.get(id),
         getClient:()=>ctx.client,
-        confirmDialog:async(win:any,input:any)=>(await confirmOwnerDialog(win,{type:'question',title:'Owner Execution Authority',message:`Cấp quyền Owner cho ${input?.operation??'authorizeExecution'}?`,detail:`Project: ${input?.canonical}\nTeam: ${input?.teamID}\nTask: ${input?.taskID??'—'}`,buttons:['Hủy','Chấp thuận'],defaultId:0,cancelId:0,noLink:true})).response===1,
+        confirmDialog:async(win:any,input:any)=>(await confirmOwnerDialog(win,{type:'question',title:'Owner Execution Authority',message:`Cấp quyền Owner cho ${input?.operation??'authorizeExecution'}?`,detail:`Project: ${input?.canonical}\nTeam: ${input?.teamID}\nTask: ${input?.taskID??'—'}\n${input?.policy?JSON.stringify(input.policy,null,2)+'\nThay giới hạn planning-only bằng quyền sửa files task trong worktree, test bwrap-v1 và commit local. integration=true cấp reviewer độc lập quyền merge đúng scope đã review, test sandbox, fast-forward canonical sạch và đồng bộ base task phụ thuộc. Giữ nguyên plan/task. Không cấp shell/edit toàn máy, credentials, push/deploy. maxCalls đếm lượt start task; chat không giới hạn. Thu hồi chặn lượt tiếp; không đảo ngược file đã ghi.':''}`,buttons:['Hủy','Chấp thuận'],defaultId:0,cancelId:0,noLink:true})).response===1,
       }).then((b:any)=>{b.confirmOwnerDialog=confirmOwnerDialog;(ctx as any).ownerAuthority=b;ctx.log.write("info","Host Owner Authority Bridge ready",{socketPath:b.socketPath})})
     }
     registerPilotOwner(ctx,issueOwnerGrant);

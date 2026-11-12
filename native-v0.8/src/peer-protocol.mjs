@@ -54,10 +54,11 @@ export function ingestPlan(state,input,ctx,attachment,now=Date.now()){
 
 const common=['requestID','planID','planVersion','projectID','teamID','canonicalRoot'];
 const taskKeys=['taskID','taskVersion','ownershipGeneration'];
-const fields={read:[],discuss:['round','text','risk'],close_round:['round'],propose:['text','dependencies','files','requiredCapabilities','acceptanceCriteria','requiredChecks'],
+const fields={read:[],discuss:['round','text','risk'],close_round:['round'],propose:['text','dependencies','files','requiredCapabilities','acceptanceCriteria','requiredChecks','assignedPeer','reviewPeer'],
   bid:[...taskKeys],ready:[...taskKeys],claim:[...taskKeys],renew:[...taskKeys,'leaseID'],release:[...taskKeys,'leaseID'],
   start:[...taskKeys,'leaseID'],submit:[...taskKeys,'leaseID','reportID'],review:[...taskKeys,'reportID','approved'],
   integrate:[...taskKeys],done:[...taskKeys],reassign_review:[...taskKeys],cancel:[...taskKeys,'text'],block:[...taskKeys,'leaseID','text'],fail:[...taskKeys,'leaseID','text'],reconcile:[...taskKeys]};
+export const protocolFields=Object.fromEntries(Object.entries(fields).map(([action,keys])=>[action,[...common,...keys]]));
 function taskFor(state,input){
   const t=protocolTasks(state).find(t=>t.id===input.taskID&&t.planID===input.planID&&t.planVersion===input.planVersion);
   if(!t||t.taskVersion!==input.taskVersion||t.ownershipGeneration!==input.ownershipGeneration)fail('PROTOCOL_STALE_TASK');return t;
@@ -65,7 +66,7 @@ function taskFor(state,input){
 function dependencies(state,t){return t.dependencies.every(d=>protocolTasks(state).some(x=>x.id===d&&x.planID===t.planID&&x.planVersion===t.planVersion&&x.status==='DONE'));}
 function eligible(m,t){return t.requiredCapabilities.every(c=>(m.capabilities??['collaboration']).includes(c));}
 export function claimant(state,t){
-  const candidates=state.members.filter(m=>eligible(m,t)&&(!t.bids.length||t.bids.includes(id(m))));
+  const candidates=state.members.filter(m=>eligible(m,t)&&id(m)!==t.reviewPeer&&(t.assignedPeer?id(m)===t.assignedPeer:!t.bids.length||t.bids.includes(id(m))));
   const load=m=>protocolTasks(state).filter(t=>t.assignee===id(m)&&active(t)).length;
   return candidates.sort((a,b)=>load(a)-load(b)||(id(a)<id(b)?-1:id(a)>id(b)?1:0))[0];
 }
@@ -74,10 +75,12 @@ function reviewer(state,primary){
   return state.members.filter(m=>id(m)!==primary&&m.sessionID!==state.members.find(m=>id(m)===primary).sessionID)
     .sort((a,b)=>load(a)-load(b)||(id(a)<id(b)?-1:id(a)>id(b)?1:0))[0];
 }
-function lease(t,actor,input,now){if(t.assignee!==actor||t.lease?.id!==input.leaseID||t.lease.expiresAt<=now)fail('PROTOCOL_LEASE_INVALID');}
+function lease(t,actor,input,now,completed=false){if(t.assignee!==actor||!t.lease||t.lease.id!==input.leaseID||!completed&&t.lease.expiresAt<=now)fail('PROTOCOL_LEASE_INVALID');}
 function report(state,t,actor,reportID){
   const a=state.artifacts?.find(a=>a.id===reportID&&a.taskID===t.id&&a.owner===actor&&a.sessionID===member(state,actor).sessionID&&a.projectID===state.projectID&&a.teamID===state.teamID&&a.status==='completed'&&a.planVersion===t.planVersion&&a.ownershipGeneration===t.ownershipGeneration&&a.workRevision===t.workRevision);
-  if(!a||!t.requiredChecks.every(check=>a.checks?.some(c=>c.command===check&&c.exitCode===0)))fail('PROTOCOL_VERIFICATION_REQUIRED');return a;
+  if(!a)fail('PROTOCOL_VERIFICATION_REQUIRED');
+  const missing=t.requiredChecks.filter(check=>!a.checks?.some(c=>c.command===check&&c.exitCode===0));
+  if(missing.length)fail(`PROTOCOL_VERIFICATION_REQUIRED: report.commands missing successful required checks ${JSON.stringify(missing)}; copy exact commands from team_worktree result, not wrapper tool name`);return a;
 }
 export function ownerSummary(state){
   const plan=state?.plans?.at(-1)??null;
@@ -99,9 +102,10 @@ export function ownerSummary(state){
 
 // ponytail: fixed membership, no native dispatch; add membership changes only with trusted revision/recovery.
 // Transactional reducer. Native execution admission/stopped evidence comes from trusted host, never payload.
-export function protocolAction(state,actor,action,input,ctx,{now=Date.now(),admit=()=>false,stopped=()=>false,verifyReport=()=>false}={}){
+export function protocolAction(state,actor,action,input,ctx,{now=Date.now(),admit=()=>false,stopped=()=>false,verifyReport=()=>false,owner=false}={}){
   if(!Object.hasOwn(fields,action))fail('PROTOCOL_ACTION_INVALID');
-  object(input,[...common,...fields[action]]);binding(state,ctx);member(state,actor);
+  object(input,[...common,...fields[action]]);binding(state,ctx);
+  if(!(owner&&actor==='owner'&&action==='propose'))member(state,actor);
   if(input.projectID!==ctx.projectID||input.teamID!==ctx.teamID||input.canonicalRoot!==ctx.root)fail('PROTOCOL_SCOPE_MISMATCH');
   text(input.requestID,100);
   const hash=digest(JSON.stringify([action,input]));
@@ -126,15 +130,23 @@ export function protocolAction(state,actor,action,input,ctx,{now=Date.now(),admi
     if(plan.round===DISCUSSION_ROUNDS)plan.discussionClosed=true;else{plan.round++;plan.roundOpenedAt=now;}
     result={round:plan.round,closed:plan.discussionClosed,needsOwner:plan.needsOwner};
   }else if(action==='propose'){
-    if(plan.discussionClosed)fail('PROTOCOL_DISCUSSION_LIMIT');
+    if(plan.discussionClosed&&!owner)fail('PROTOCOL_DISCUSSION_LIMIT');
     if(protocolTasks(state).filter(t=>t.planID===plan.planID&&t.planVersion===plan.version&&t.proposedBy===actor).length>=32)fail('PROTOCOL_PROPOSAL_LIMIT');
     text(input.text);list(input.dependencies);paths(input.files);list(input.requiredCapabilities);list(input.acceptanceCriteria);list(input.requiredChecks);
     if(!input.acceptanceCriteria.length||!input.requiredChecks.length)fail('PROTOCOL_ACCEPTANCE_REQUIRED');
+    if(input.assignedPeer!==undefined)member(state,input.assignedPeer);
+    if(input.reviewPeer!==undefined){
+      const r=member(state,input.reviewPeer);
+      if(input.assignedPeer&&(input.reviewPeer===input.assignedPeer||r.sessionID===member(state,input.assignedPeer).sessionID))fail('PROTOCOL_INDEPENDENT_REVIEW_REQUIRED');
+    }
     // Append-only dependency graph: edges point only to existing tasks in this exact plan version; cycles impossible.
     if(input.dependencies.some(d=>!protocolTasks(state).some(t=>t.id===d&&t.planID===plan.planID&&t.planVersion===plan.version)))fail('PROTOCOL_DEPENDENCY_INVALID');
     const t={protocolVersion:PROTOCOL_VERSION,id:`task_${randomUUID()}`,planID:plan.planID,planVersion:plan.version,taskVersion:1,ownershipGeneration:0,workRevision:1,
       text:input.text,status:'DRAFT',assignee:'unclaimed',reviewer:null,proposedBy:actor,dependencies:[...input.dependencies],files:[...input.files],requiredCapabilities:[...input.requiredCapabilities],acceptanceCriteria:[...input.acceptanceCriteria],requiredChecks:[...input.requiredChecks],bids:[],executionState:'not-started'};
-    if(!state.members.some(m=>eligible(m,t)))fail('PROTOCOL_NO_ELIGIBLE_MEMBER');
+    if(input.assignedPeer!==undefined)t.assignedPeer=input.assignedPeer;
+    if(input.reviewPeer!==undefined)t.reviewPeer=input.reviewPeer;
+    if(!state.members.some(m=>eligible(m,t)&&(!t.assignedPeer||id(m)===t.assignedPeer)&&id(m)!==t.reviewPeer))fail('PROTOCOL_NO_ELIGIBLE_MEMBER');
+    if(owner)t.assignmentSource='owner';
     state.tasks.push(t);result=structuredClone(t);
   }else{
     const t=taskFor(state,input);
@@ -147,10 +159,12 @@ export function protocolAction(state,actor,action,input,ctx,{now=Date.now(),admi
       if(t.status!=='READY'||plan.needsOwner||id(claimant(state,t)??{})!==actor)fail('PROTOCOL_CLAIM_DENIED');
       if(!taskReadiness(state,t).ready)fail('PROTOCOL_DEPENDENCIES_OR_STATE');
       if(protocolTasks(state).some(x=>x.id!==t.id&&(x.executionState==='outstanding'||x.assignee!=='unclaimed'&&active(x))&&x.files.some(a=>t.files.some(b=>a===b||a.startsWith(b+'/')||b.startsWith(a+'/')))))fail('PROTOCOL_FILE_CONFLICT');
-      const r=reviewer(state,actor);if(!r)fail('PROTOCOL_REVIEWER_REQUIRED');
+      const r=t.reviewPeer?member(state,t.reviewPeer):reviewer(state,actor);if(!r||id(r)===actor||r.sessionID===member(state,actor).sessionID)fail('PROTOCOL_REVIEWER_REQUIRED');
       t.assignee=actor;t.reviewer=id(r);t.status='CLAIMED';t.ownershipGeneration++;t.lease={id:`lease_${randomUUID()}`,expiresAt:now+LEASE_MS};
     }else if(action==='renew'){
-      lease(t,actor,input,now);if(!['CLAIMED','RUNNING','REWORK','BLOCKED'].includes(t.status))fail('PROTOCOL_TRANSITION_INVALID');t.lease.expiresAt=now+LEASE_MS;
+      // Completed worker may renew for submission only; identity and stop proof remain mandatory.
+      const completed=t.status==='RUNNING'&&t.executionState==='stopped'&&stopped(t)===true;
+      lease(t,actor,input,now,completed);if(!['CLAIMED','RUNNING','REWORK','BLOCKED'].includes(t.status))fail('PROTOCOL_TRANSITION_INVALID');t.lease.expiresAt=now+LEASE_MS;
     }else if(action==='release'){
       lease(t,actor,input,now);if(t.status!=='CLAIMED'||t.executionState!=='not-started')fail('PROTOCOL_STOP_NOT_PROVEN');
       t.status='READY';t.assignee='unclaimed';t.reviewer=null;t.lease=null;t.ownershipGeneration++;
@@ -186,7 +200,10 @@ export function protocolAction(state,actor,action,input,ctx,{now=Date.now(),admi
     }else if(action==='block'||action==='fail'){
       lease(t,actor,input,now);text(input.text);if(!['CLAIMED','RUNNING','REWORK'].includes(t.status))fail('PROTOCOL_TRANSITION_INVALID');t.status=action==='block'?'BLOCKED':'FAILED';t.reason=input.text;
     }else if(action==='reconcile'){
-      if(!t.lease||t.lease.expiresAt>now)fail('PROTOCOL_LEASE_NOT_EXPIRED');
+      const identity=JSON.stringify(executionIdentity(state,t));
+      const attempt=state.executions?.findLast(e=>e.taskID===t.id&&JSON.stringify(e.identity)===identity);
+      const failedAttempt=t.assignee===actor&&t.status==='RUNNING'&&t.executionState==='stopped'&&attempt?.state==='stop-verified'&&attempt.stopReceipt?.outcome==='failed'&&stopped(t)===true;
+      if(!t.lease||t.lease.expiresAt>now&&!failedAttempt)fail('PROTOCOL_LEASE_NOT_EXPIRED');
       if(t.executionState!=='not-started'&&stopped(t)!==true)fail('PROTOCOL_STOP_NOT_PROVEN');
       t.executionState='stopped';t.ownershipGeneration++;t.lease=null;
       if(active(t)){t.status='READY';t.assignee='unclaimed';t.reviewer=null;t.executionState='not-started';t.workRevision++;t.submission=null;t.review=null;}

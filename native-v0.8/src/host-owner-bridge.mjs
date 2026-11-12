@@ -24,6 +24,9 @@ const canonPolicy=(meta,p)=>JSON.stringify([HOST_SECURITY_BOUNDARY_VERSION,meta.
 export function startHostOwnerBridge(dirOrOpts,opts={}){
   const cfg=typeof dirOrOpts==='string'?{userDataDir:dirOrOpts,...opts}:(dirOrOpts??{});
   const {userDataDir,hostVersion='2.2.6',getWindows=()=>[],getWindow,getClient,confirmDialog=async()=>false,now=()=>Date.now()}=cfg;
+  // Main plugin reload must not rotate signing keys underneath durable execution grants.
+  const bridges=globalThis[Symbol.for('ai-team.owner-authority')]??=new Map();
+  if(bridges.has(userDataDir))return bridges.get(userDataDir);
   mkdirSync(userDataDir,{recursive:true,mode:0o700});chmodSync(userDataDir,0o700);
   const socketPath=join(userDataDir,'owner-authority.sock'),keyPath=join(userDataDir,'owner-authority.key'),pubPath=join(userDataDir,'owner-authority.pub');
   try{rmSync(socketPath,{force:true});}catch{}
@@ -82,7 +85,7 @@ export function startHostOwnerBridge(dirOrOpts,opts={}){
     });
   });
 
-  return new Promise((resolve,reject)=>{
+  const started=new Promise((resolve,reject)=>{
     server.on('error',reject);
     server.listen(socketPath,()=>{
       chmodSync(socketPath,0o600);
@@ -164,10 +167,22 @@ export function startHostOwnerBridge(dirOrOpts,opts={}){
           return count;
         },
         revokeCapability(capID){const cap=capabilities.get(capID);if(cap)cap.revoked=true;},
-        close:()=>new Promise(r=>server.close(()=>{try{rmSync(socketPath,{force:true});}catch{}r();})),
+        close:()=>new Promise(r=>server.close(()=>{bridges.delete(userDataDir);try{rmSync(socketPath,{force:true});}catch{}r();})),
       });
     });
   });
+  bridges.set(userDataDir,started);
+  started.catch(()=>bridges.delete(userDataDir));
+  return started;
+}
+
+export function executionAuthorization(state,verifyPolicy=verifyHostOwnerPolicy){
+  try{
+    verifyPolicy(state);
+    const policy=state.executionPolicy,plan=state.plans?.at(-1);
+    if(!policy||policy.revokedAt||!plan||plan.ownerDecision!=='approve'||plan.needsOwner||policy.planID!==plan.planID||policy.planVersion!==plan.version||policy.digest!==plan.digest)throw Error('PEER_WORKTREE_POLICY_REQUIRED');
+    return {authorized:true,reason:'WORKTREE_AUTHORIZED'};
+  }catch(error){return {authorized:false,reason:error instanceof Error?error.message:'PEER_WORKTREE_POLICY_REQUIRED'};}
 }
 
 export function verifyHostOwnerPolicy(state,policy=state?.executionPolicy){

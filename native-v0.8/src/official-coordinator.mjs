@@ -1,5 +1,6 @@
 import {mkdirSync,readFileSync,writeFileSync,openSync,closeSync,fsyncSync,renameSync,unlinkSync,realpathSync,lstatSync} from 'node:fs';
 import {dirname,join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createHash,randomUUID} from 'node:crypto';
 import net from 'node:net';
 import {homedir} from 'node:os';
@@ -8,7 +9,8 @@ import {DEFAULT_MODELS,sameModel} from './model-routing.mjs';
 import {publicModels} from './pilot-models.mjs';
 import {reportBody,writeReport,readReport} from './pilot-reports.mjs';
 import {peerPlan,planHash,memberID} from './peer-team.mjs';
-import {ingestPlan,protocolAction} from './peer-protocol.mjs';
+import {ingestPlan,protocolAction,protocolFields} from './peer-protocol.mjs';
+import {queueMessages} from './peer-delivery.mjs';
 import {denyLiveAdmission} from './peer-security.mjs';
 import {inbox,acknowledge} from './peer-delivery.mjs';
 import {reviewPlan} from './peer-approvals.mjs';
@@ -16,6 +18,7 @@ import {verifyNativeBinding,hasVerifiedStop} from './peer-native.mjs';
 import {integrateReviewedTask} from './peer-integration.mjs';
 import {assertScopedPath} from './permissions.mjs';
 import {verifyHostOwnerPolicy} from './host-owner-bridge.mjs';
+import {admission} from './native-peer-adapter.mjs';
 
 export const APPROVED_PROJECT='/home/hulk/projects/v08-desktop-acceptance';
 export const APPROVED_PROJECT_ROOT_COMMIT='7af15c690957779faf78055670eafcd356a1c201';
@@ -79,7 +82,27 @@ export async function verifyHostOwnerTicket(ticket,binding){
 }
 const gitEnv=()=>({...Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith('GIT_'))),GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'});
 
-export function runInBwrapSandbox(cwd,argv,{timeout=15000,forbiddenPaths=[]}={}){
+function browserCheckMounts(){
+  // ponytail: reuse installed host runtime; configure portable discovery when packaging beyond this host.
+  const dependencies=join(homedir(),'.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules');
+  const browsers=join(homedir(),'.cache/ms-playwright');
+  for(const path of [dependencies,browsers])if(realpathSync(path)!==path)throw Error('PEER_BROWSER_RUNTIME_INVALID');
+  return ['--ro-bind',join(dependencies,'playwright'),'/opt/peer-runtime/playwright','--ro-bind',join(dependencies,'playwright-core'),'/opt/peer-runtime/playwright-core','--ro-bind',browsers,'/opt/peer-browsers','--ro-bind',fileURLToPath(new URL('./peer-browser-check.mjs',import.meta.url)),'/opt/peer-browser-check.mjs'];
+}
+
+export async function runRequiredChecks(cwd,checks,forbiddenPaths=[]){
+  const commands=[];
+  for(const check of checks){
+    const browserCheck=['browser smoke: CRUD/filter/comment/reload/import/export','browser smoke','browser e2e','keyboard-only check','viewport 375px check','README commands verified','mobile 375px','keyboard-only'].includes(check);
+    if(!browserCheck&&!/^node --test(?:\s+[A-Za-z0-9_./-]+)*$/.test(check))throw Error('PEER_WORKTREE_CHECK_FORBIDDEN');
+    if(!browserCheck)for(const path of check.split(/\s+/).slice(2))await assertScopedPath(cwd,path);
+    const output=runInBwrapSandbox(cwd,browserCheck?['/opt/peer-browser-check.mjs',check]:check.split(/\s+/).slice(1),{timeout:browserCheck?60000:15000,forbiddenPaths,browserCheck});
+    commands.push({command:check,exitCode:0,output:output.slice(0,4000)});
+  }
+  return commands;
+}
+
+export function runInBwrapSandbox(cwd,argv,{timeout=15000,forbiddenPaths=[],browserCheck}={}){
   const realCwd=realpathSync(cwd);
   if(realCwd!==cwd)throw Error('PEER_WORKTREE_SANDBOX_PATH_INVALID');
   const blocked=['/opt/OpenCode',join(homedir(),'.config/opencode'),join(homedir(),'.config/ai.opencode.desktop'),process.env.OPENCODE_OWNER_AUTHORITY_DIR,...forbiddenPaths].filter(Boolean);
@@ -87,6 +110,7 @@ export function runInBwrapSandbox(cwd,argv,{timeout=15000,forbiddenPaths=[]}={})
   const nodeBin=[process.execPath,join(homedir(),'.local/nodejs/bin/node'),'/home/hulk/.local/nodejs/bin/node','/usr/local/bin/node','/usr/bin/node'].find(p=>{try{return /(?:^|\/)node$/.test(p)&&lstatSync(p);}catch{return false;}})||'node';
   const nodeReal=realpathSync(nodeBin),nodeRoot=dirname(dirname(nodeReal)),gitPath=join(realCwd,'.git');
   let gitMask=[];
+  const browserMounts=browserCheck?browserCheckMounts():[];
   try{gitMask=lstatSync(gitPath).isDirectory()?['--tmpfs',gitPath]:['--ro-bind-try','/dev/null',gitPath];}catch{}
   const bwrapArgs=[
     '--unshare-all','--die-with-parent','--new-session','--cap-drop','ALL','--clearenv',
@@ -101,6 +125,7 @@ export function runInBwrapSandbox(cwd,argv,{timeout=15000,forbiddenPaths=[]}={})
     '--tmpfs','/tmp','--tmpfs','/run','--tmpfs','/var','--tmpfs','/home',
     ...(nodeRoot.startsWith('/usr')?[]:['--ro-bind',nodeRoot,nodeRoot]),
     '--ro-bind',realCwd,realCwd,
+    ...browserMounts,
     ...gitMask,
     '--chdir',realCwd,
     '--setenv','PATH',`${dirname(nodeReal)}:/usr/local/bin:/usr/bin:/bin`,
@@ -108,10 +133,12 @@ export function runInBwrapSandbox(cwd,argv,{timeout=15000,forbiddenPaths=[]}={})
     '--setenv','TMPDIR','/tmp',
     '--setenv','OPENCODE_WORKER_SANDBOX','bwrap-v1',
     '--setenv','OPENCODE_WORKSPACE_DIR',realCwd,
+    ...(browserCheck?['--setenv','PLAYWRIGHT_BROWSERS_PATH','/opt/peer-browsers']:[]),
     '--','/bin/sh','-c','for fd in /proc/self/fd/*; do n=${fd##*/}; [ "$n" -gt 2 ] 2>/dev/null && eval "exec ${n}<&- ${n}>&-" || true; done; exec "$@"','--',
     nodeReal,...argv,
   ];
-  return execFileSync('bwrap',bwrapArgs,{cwd:realCwd,env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:'/tmp',TMPDIR:'/tmp',OPENCODE_WORKER_SANDBOX:'bwrap-v1'},encoding:'utf8',timeout,stdio:['ignore','pipe','pipe']});
+  try{return execFileSync('bwrap',bwrapArgs,{cwd:realCwd,env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:'/tmp',TMPDIR:'/tmp',OPENCODE_WORKER_SANDBOX:'bwrap-v1'},encoding:'utf8',timeout,stdio:['ignore','pipe','pipe']});}
+  catch(error){throw Error(`PEER_WORKTREE_CHECK_FAILED: ${String(error.stderr||error.code||error.message).slice(-3000)}`);}
 }
 
 export function validGitProject(root){
@@ -177,12 +204,55 @@ export class OfficialCoordinator {
   }
   async caller(context){
     const state=this.read(),member=state?.members.find(m=>m.sessionID===context?.sessionID);
-    if(!member||state.projectID!==this.ctx.location.project.id)throw Error('PILOT_MEMBER_REQUIRED');
+    if(!member||state.status!=='ready'||state.projectID!==this.ctx.location.project.id)throw Error('PILOT_MEMBER_REQUIRED');
     const session=await this.ctx.session.get({sessionID:context.sessionID});
     for(const [field,actual,expected] of [['session',session.id,member.sessionID],['project',session.projectID,state.projectID],['agent',session.agent,member.agent],['caller-agent',context.agent,member.agent],['directory',session.location.directory,member.directory],['workspace',session.location.workspaceID,member.workspaceID]])if(actual!==expected)throw Error(`PILOT_BINDING_MISMATCH:${field}`);
     if(this.ctx.location.directory!==member.directory)throw Error('PILOT_TOOL_LOCATION_MISMATCH');
     if(member.branch&&gitBinding(member.directory)!==member.branch)throw Error('PILOT_BRANCH_MISMATCH');
     return member;
+  }
+  async upgradeWorktrees(){
+    const before=this.read();
+    if(before?.mode!=='peer'||before.isolation!=='read-only'||before.status!=='ready'||this.ctx.location.directory!==this.root)throw Error('PILOT_UPGRADE_STATE_INVALID');
+    if(!validGitProject(this.root))throw Error('PILOT_GIT_PROJECT_REQUIRED');
+    if(before.canonicalRoot!==this.root||before.executionPolicy||before.approvals?.length)throw Error('PILOT_UPGRADE_PROJECT_CHANGED');
+    if(before.tasks.length||(before.executions??[]).length)throw Error('PILOT_UPGRADE_TASKS_EXIST');
+    if(typeof this.ctx.session.active!=='function'&&typeof this.ctx.session.wait!=='function')throw Error('PILOT_UPGRADE_ACTIVITY_UNKNOWN');
+    const active=typeof this.ctx.session.active==='function'?await this.ctx.session.active():null,models=new Map();
+    if(active!==null&&(!active||typeof active!=='object'||Array.isArray(active)))throw Error('PILOT_UPGRADE_ACTIVITY_UNKNOWN');
+    for(const member of before.members){
+      if(active===null){
+        let timer;
+        try{await Promise.race([this.ctx.session.wait({sessionID:member.sessionID}),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('PILOT_UPGRADE_SESSION_ACTIVE')),2000);})]);}
+        finally{clearTimeout(timer);}
+      }
+      const session=await this.ctx.session.get({sessionID:member.sessionID});
+      if((active?.data??active)?.[member.sessionID])throw Error('PILOT_UPGRADE_SESSION_ACTIVE');
+      if(session.id!==member.sessionID||![before.projectID,this.ctx.location.project.id].includes(session.projectID)||session.location.directory!==this.root||session.location.workspaceID!==member.workspaceID||session.agent!==member.agent)throw Error('PILOT_UPGRADE_BINDING_MISMATCH');
+      models.set(memberID(member),session.model??member.modelDefault);
+    }
+    const revision=JSON.stringify(before);
+    this.mutate(state=>{
+      if(JSON.stringify(state)!==revision)throw Error('PILOT_UPGRADE_STALE');
+      state.status='upgrading';state.previousMembers=structuredClone(state.members);
+      state.provisioning=state.members.map(m=>({id:memberID(m),status:'pending'}));return {};
+    });
+    // ponytail: interrupted migration stays blocked; add explicit recovery before retrying uncertain native effects.
+    for(const member of before.members){
+      const id=memberID(member),name=`pilot-${id}-${randomUUID()}`;
+      this.mutate(state=>{state.provisioning.find(m=>m.id===id).status='creating';return {};});
+      const wt=await this.ctx.worktree.create({projectID:this.ctx.location.project.id,name}),directory=wt.directory;
+      const common=p=>realpathSync(execFileSync('git',['-C',p,'rev-parse','--path-format=absolute','--git-common-dir'],{encoding:'utf8',env:gitEnv()}).trim());
+      if(typeof directory!=='string'||realpathSync(directory)!==directory||directory===this.root||common(directory)!==common(this.root)||this.read().members.some(m=>m.directory===directory))throw Error('PILOT_WORKSPACE_ISOLATION_REQUIRED');
+      execFileSync('git',['-C',directory,'switch','--create',name],{stdio:'pipe',env:gitEnv()});
+      const session=await this.ctx.session.create({title:`AI Team V0.8 | ${member.label}`,agent:member.agent,model:models.get(id),permissions:PEER_SESSION_PERMISSIONS,location:{directory}});
+      if(session.projectID!==this.ctx.location.project.id||session.location.directory!==directory||session.agent!==member.agent||!sameModel(session.model,models.get(id)))throw Error('PILOT_PROVISIONING_BINDING_MISMATCH');
+      const actual=await this.ctx.session.get({sessionID:session.id});
+      verifyNativeBinding({...before,projectID:this.ctx.location.project.id},{...member,sessionID:session.id,directory,workspaceID:session.location.workspaceID,branch:gitBinding(directory),modelDefault:models.get(id)},actual);
+      this.mutate(state=>{const m=state.members.find(m=>memberID(m)===id);Object.assign(m,{sessionID:session.id,directory,workspaceID:session.location.workspaceID,branch:gitBinding(directory),worktreeID:wt.id??name,modelDefault:models.get(id),editingEnabled:false});delete m.modelPreference;state.provisioning.find(m=>m.id===id).status='created';return {};});
+    }
+    this.mutate(state=>{state.previousProjectID=state.projectID;state.projectID=this.ctx.location.project.id;state.isolation='git-worktree';state.rootCommit=projectIdentity(this.root).rootCommit;state.status='ready';return {};});
+    return this.read();
   }
   async bootstrap(input){
     if(this.read())return this.read();
@@ -246,6 +316,32 @@ export class OfficialCoordinator {
     }
     return this.read().messages.find(m=>m.id===message.id);
   }
+  async ownerExecution(input){
+    return this.mutate(state=>{
+      const plan=state?.plans?.at(-1);
+      if(Object.keys(input).some(k=>!['operation','requestID','policy','revoke','planID','planVersion','digest'].includes(k))||typeof input.requestID!=='string'||!input.requestID.trim()||input.requestID.length>160||!plan||plan.planID!==input.planID||plan.version!==input.planVersion||plan.digest!==input.digest)throw Error('EXECUTION_INPUT_INVALID');
+      state.executionAuthorizations??=[];
+      const hash=planHash(input),old=state.executionAuthorizations.find(r=>r.requestID===input.requestID);
+      if(old){if(old.hash!==hash)throw Error('PILOT_IDEMPOTENCY_CONFLICT');return {value:old};}
+      if(input.revoke===true){if(state.executionPolicy)state.executionPolicy.revokedAt=Date.now();}
+      else{
+        const p=input.policy;
+        if(state.mode!=='peer'||state.status!=='ready'||state.isolation!=='git-worktree'||state.canonicalRoot!==this.root||plan.ownerDecision!=='approve'||plan.needsOwner||!plan.discussionClosed||!p||Object.keys(p).some(k=>!['planID','planVersion','digest','maxActive','maxAttemptsPerTask','maxCalls','timeoutMs','models','capabilityID','signature'].includes(k))||p.planID!==plan.planID||p.planVersion!==plan.version||p.digest!==plan.digest||![p.maxActive,p.maxAttemptsPerTask,p.maxCalls,p.timeoutMs].every(n=>Number.isSafeInteger(n)&&n>0)||p.maxActive>4||p.maxAttemptsPerTask>10||p.maxCalls>1000||p.timeoutMs>3600000||!Array.isArray(p.models)||!p.models.length||p.models.some(model=>!state.members.some(m=>sameModel(m.modelDefault,model))))throw Error('EXECUTION_POLICY_INVALID');
+        verifyHostOwnerPolicy(state,p);
+        const prior=state.executionPolicy;
+        const refresh=prior&&['planID','planVersion','digest','maxActive','maxAttemptsPerTask','maxCalls','timeoutMs','models'].every(k=>JSON.stringify(prior[k])===JSON.stringify(p[k]));
+        if(state.tasks.some(t=>t.executionState==='outstanding')&&!refresh)throw Error('EXECUTION_OUTSTANDING');
+        if(state.executionAuthorizations.some(r=>r.signature===p.signature))throw Error('EXECUTION_POLICY_REPLAY');
+        state.executionPolicy={...structuredClone(p),usedCalls:refresh?prior.usedCalls:0};
+        if(refresh)for(const row of state.executions??[]){
+          const task=state.tasks.find(t=>t.id===row.taskID);
+          if(row.scope==='worktree'&&row.state==='admitted-by-adapter'&&row.deadline>Date.now()&&task?.lease&&task.ownershipGeneration===row.identity.ownershipGeneration&&task.workRevision===row.identity.workRevision)task.lease.expiresAt=Math.max(task.lease.expiresAt,row.deadline);
+        }
+      }
+      const receipt={requestID:input.requestID,hash,signature:input.policy?.signature,revoked:input.revoke===true,planID:plan.planID,planVersion:plan.version,digest:plan.digest,at:Date.now(),scope:this.root,authority:'owner-bridge',supersedesPlanningOnly:input.revoke!==true};
+      state.executionAuthorizations.push(receipt);return {value:receipt};
+    });
+  }
   async ownerSend(input){
     if(!input||typeof input!=='object')throw Error('INVALID_PILOT_INPUT');
     if(typeof input.text!=='string'||!input.text.trim())throw Error('PILOT_TEXT_REQUIRED');
@@ -267,9 +363,32 @@ export class OfficialCoordinator {
     });
   }
   async ownerPlan(input){
+    if(input?.operation==='execution')return this.ownerExecution(input);
     if(input?.operation==='selectModel')return this.selectModel(input);
     if(input?.operation==='testFixtureAction')return this.testFixtureAction(input);
     return this.mutate(state=>{
+      if(input?.operation==='closeDiscussion'){
+        if(Object.keys(input).some(k=>!['operation','requestID','planID','planVersion','digest'].includes(k))||typeof input.requestID!=='string')throw Error('PLAN_REVIEW_INVALID');
+        const plan=state?.plans?.at(-1);
+        if(!plan||plan.planID!==input.planID||plan.version!==input.planVersion||plan.digest!==input.digest||plan.ownerDecision!=='approve')throw Error('PLAN_REVIEW_STALE');
+        plan.discussionClosed=true;state.discussionClosures??=[];
+        if(!state.discussionClosures.some(r=>r.requestID===input.requestID))state.discussionClosures.push({...input,at:Date.now(),authority:'owner-bridge'});
+        return {value:{discussionClosed:true,executionAuthorized:false}};
+      }
+      if(input?.operation==='collaboration'){
+        if(Object.keys(input).some(k=>!['operation','requestID','enabled'].includes(k))||typeof input.enabled!=='boolean'||typeof input.requestID!=='string'||state?.mode!=='peer'||state.status!=='ready'||state.projectID!==this.ctx.location.project.id)throw Error('COLLABORATION_INPUT_INVALID');
+        state.collaborationRequests??=[];
+        const old=state.collaborationRequests.find(r=>r.requestID===input.requestID);
+        if(old){if(old.enabled!==input.enabled)throw Error('PILOT_IDEMPOTENCY_CONFLICT');return {value:state.collaboration};}
+        state.collaboration={enabled:input.enabled,enabledAt:Date.now(),requestID:input.requestID};
+        if(!input.enabled)for(const d of state.deliveries??[])if(d.status==='queued')d.status='paused';
+        state.collaborationRequests.push({requestID:input.requestID,enabled:input.enabled});
+        return {value:state.collaboration};
+      }
+      if(input?.operation==='createTask'){
+        const {operation,...task}=input;
+        return {value:protocolAction(state,'owner','propose',task,{root:this.root,projectID:this.ctx.location.project.id,teamID:state?.teamID},{owner:true})};
+      }
       if(input?.decision!==undefined)return {value:reviewPlan(state,input)};
       const ctx={root:this.root,projectID:this.ctx.location.project.id,teamID:state?.teamID};
       if(!input||typeof input!=='object'||Array.isArray(input))throw Error('PROTOCOL_INPUT_INVALID');
@@ -425,37 +544,138 @@ export class OfficialCoordinator {
       this.ctx.location.directory=origDir;
     }
   }
+  async integrateTask(input,member){
+    const state=this.read(),task=state.tasks.find(t=>t.id===input.taskID),plan=state.plans?.at(-1);
+    // Validate exact protocol binding/CAS before any filesystem effect.
+    try{protocolAction(structuredClone(state),memberID(member),'integrate',input,{root:this.root,projectID:state.projectID,teamID:state.teamID},{verifyReport:id=>{readReport(this.directory,state,state.projectID,id);return true;}});}catch(error){if(error.message!=='PROTOCOL_MERGE_NOT_PROVEN')throw error;}
+    const authorize=()=>{
+      const current=this.read(),p=current.executionPolicy,latest=current.plans?.at(-1);
+      verifyHostOwnerPolicy(current,p);
+      if(p.revokedAt||!p.capabilityID?.startsWith('worktree-integration-v1:')||p.digest!==plan.digest||p.planID!==plan.planID||p.planVersion!==plan.version||latest?.digest!==plan.digest||latest.version!==plan.version||latest.ownerDecision!=='approve'||latest.needsOwner)throw Error('PEER_INTEGRATION_POLICY_REQUIRED');
+      return true;
+    };
+    authorize();
+    const git=(cwd,...args)=>execFileSync('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','commit.gpgsign=false','-C',cwd,...args],{env:gitEnv(),encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+    const parent=join(dirname(this.root),`.${this.root.split('/').at(-1)}-integrations`);mkdirSync(parent,{recursive:true});
+    const prior=state.integrations?.find(r=>r.requestID===input.requestID);
+    const source=state.executions?.findLast(e=>e.taskID===task.id&&e.identity.ownershipGeneration===task.ownershipGeneration&&e.identity.workRevision===task.workRevision&&e.stopReceipt?.sourceCommit)?.stopReceipt.sourceCommit;
+    const request=prior?.input??{requestID:input.requestID,taskID:task.id,taskVersion:task.taskVersion,ownershipGeneration:task.ownershipGeneration,workRevision:task.workRevision,baseCommit:git(this.root,'rev-parse','HEAD'),sourceCommit:source,directory:join(parent,randomUUID())};
+    const receipt=await integrateReviewedTask(this,request,{authorize,verifyReview:async req=>[req.submission,req.reviewReportID].every(id=>readReport(this.directory,this.read(),state.projectID,id).content.includes(req.sourceCommit))});
+    if(receipt.state!=='merged')throw Error(`PEER_INTEGRATION_${receipt.state.toUpperCase()}`);
+    const commands=await runRequiredChecks(request.directory,task.requiredChecks,[this.directory,this.root]);
+    this.mutate(current=>{
+      authorize();
+      const t=current.tasks.find(t=>t.id===task.id),row=current.integrations.find(r=>r.id===receipt.id);
+      if(t.taskVersion!==input.taskVersion||t.reviewer!==memberID(member)||t.status!=='REVIEW')throw Error('PEER_INTEGRATION_STALE_REVIEW');
+      if(git(this.root,'status','--porcelain'))throw Error('PEER_INTEGRATION_CANONICAL_DIRTY');
+      const head=git(this.root,'rev-parse','HEAD');
+      if(head!==receipt.resultCommit){
+        if(head!==receipt.baseCommit)throw Error('PEER_INTEGRATION_COMMIT_INVALID');
+        git(this.root,'merge','--ff-only',receipt.resultCommit);
+      }
+      row.canonicalCommit=git(this.root,'rev-parse','HEAD');row.commands=commands;return {};
+    });
+  }
   async protocol(action,input,context,adapters={}){
     const m=await this.caller(context);
-    return this.mutate(state=>({value:protocolAction(state,memberID(m),action,input,{root:this.root,projectID:this.ctx.location.project.id,teamID:state?.teamID},{now:adapters.now,admit:adapters.admit??(()=>{denyLiveAdmission();}),stopped:adapters.stopped??(t=>hasVerifiedStop(state,t)),verifyReport:id=>{readReport(this.directory,state,state.projectID,id);return true;}})}));
+    if(action==='read'&&input&&Object.keys(input).length===0){
+      const state=this.read(),plan=state.plans?.at(-1);
+      if(!plan)throw Error('PROTOCOL_PLAN_REQUIRED');
+      input={requestID:randomUUID(),planID:plan.planID,planVersion:plan.version,projectID:state.projectID,teamID:state.teamID,canonicalRoot:this.root};
+    }
+    if(action==='integrate'&&!adapters.admit&&this.read().executionPolicy&&!this.read().protocolRequests?.some(r=>r.actor===memberID(m)&&r.requestID===input?.requestID))await this.integrateTask(input,m);
+    const result=this.mutate(state=>{
+      if(action==='submit'&&state.executions?.some(e=>e.taskID===input.taskID&&e.identity.ownershipGeneration===input.ownershipGeneration&&e.stopReceipt?.outcome==='failed'))throw Error('PEER_WORKTREE_FAILED_ATTEMPT_REQUIRES_RECONCILE');
+      if(['integrate','done'].includes(action)&&state.executionPolicy){
+        const t=state.tasks.find(t=>t.id===input.taskID);
+        if(!state.integrations?.some(r=>r.taskID===t?.id&&r.state==='merged'&&r.canonicalCommit===r.resultCommit&&r.commands?.length&&r.input.ownershipGeneration===t.ownershipGeneration&&r.input.workRevision===t.workRevision&&r.reviewReportID===t.review?.reportID))throw Error('PROTOCOL_CANONICAL_MERGE_NOT_PROVEN');
+      }
+      const result=protocolAction(state,memberID(m),action,input,{root:this.root,projectID:this.ctx.location.project.id,teamID:state?.teamID},{now:adapters.now,admit:adapters.admit??(({state,task,plan})=>{
+        if(!state.executionPolicy)denyLiveAdmission();
+        verifyHostOwnerPolicy(state);
+        if(state.isolation!=='git-worktree'||!m.branch||m.directory===this.root)throw Error('PEER_WORKTREE_ISOLATION_REQUIRED');
+        const p=admission(state,task,m,plan);
+        if((state.executions??[]).filter(e=>e.scope==='worktree'&&e.state!=='stop-verified').length>=p.maxActive)throw Error('PEER_NATIVE_CONCURRENCY_LIMIT');
+        if((state.executions??[]).filter(e=>e.taskID===task.id&&e.scope==='worktree').length>=p.maxAttemptsPerTask)throw Error('PEER_NATIVE_RETRY_CEILING');
+        p.usedCalls++;return true;
+      }),stopped:adapters.stopped??(t=>hasVerifiedStop(state,t)),verifyReport:id=>{readReport(this.directory,state,state.projectID,id);return true;}});
+      if(action==='start'&&!adapters.admit){const row=state.executions.findLast(e=>e.taskID===result.id&&e.identity.ownershipGeneration===result.ownershipGeneration&&e.identity.workRevision===result.workRevision);if(!row.scope){row.scope='worktree';row.deadline=Date.now()+state.executionPolicy.timeoutMs;}}
+      if(['start','renew'].includes(action)&&!adapters.admit){
+        const row=state.executions?.findLast(e=>e.taskID===result.id&&e.scope==='worktree'&&e.state==='admitted-by-adapter');
+        if(row){const task=state.tasks.find(t=>t.id===result.id);task.lease.expiresAt=Math.max(task.lease.expiresAt,row.deadline);result.lease.expiresAt=task.lease.expiresAt;}
+      }
+      if(['submit','review','done','reassign_review'].includes(action)){
+        const key=`handoff:${result.id}:${result.taskVersion}`;
+        if(!state.messages.some(message=>message.requestID===key))state.messages.push({id:randomUUID(),requestID:key,from:memberID(m),to:action==='submit'||action==='reassign_review'?result.reviewer:action==='review'&&result.status==='REWORK'?result.assignee:'team',action:'handoff',text:`Task event ${action}: ${result.id}, status ${result.status}. Read team_protocol before acting; preserve independent review and execution authorization.`,taskID:result.id,at:new Date().toISOString()});
+      }
+      return {value:result};
+    });
+    if(action==='read'){
+      const state=this.read(),p=state.executionPolicy,plan=state.plans.at(-1);
+      let authorized=false;try{verifyHostOwnerPolicy(state,p);authorized=!p.revokedAt&&p.digest===plan.digest&&p.planID===plan.planID&&p.planVersion===plan.version;}catch{}
+      result.policy={...result.policy,executionEnabled:authorized,scope:'worktree',executionPolicy:authorized?p:null};
+      result.allowedFields=protocolFields;
+      result.reportInstructions='team_report commands must preserve exact command, exitCode and output rows returned by team_worktree. A wrapper name such as team_worktree verify does not satisfy requiredChecks. Never invent passing checks; rerun missing checks before reporting.';
+      result.executionInstructions='Execution grant permits team_worktree apply only, not native edit/shell. start reserves one bounded attempt. Renew lease before writing; use team_worktree apply with all task files and tests. Required check names browser smoke, browser e2e, mobile 375px, keyboard-only, keyboard-only check, viewport 375px check, README commands verified and browser smoke: CRUD/filter/comment/reload/import/export are supported trusted bwrap-v1 runners, not shell commands. Preserve requiredChecks; do not replace browser checks with node --test. Component contract: renderKanban(container,tasks,onMove), callback (id,status). Successful sandbox tests + local commit verify scoped worker stop; then team_report and submit. Reviewer uses team_worktree verify, separate report, review/integrate/done. Expired CLAIMED task: reconcile then read/claim with fresh versions. Do not create duplicate tasks. maxCalls counts starts, not chat.';
+    }
+    await this.dispatchMessages();
+    return action==='read'?{...result,instructions:'Task actions require exact full task.id as taskID plus current taskVersion and ownershipGeneration. Never abbreviate IDs or include workRevision in bid/ready/claim. close_round requires round=plan.round; skip when discussionClosed=true. Owner approval closes discussion; call ready for each DRAFT task before claim. Read again after stale-task errors.',binding:{projectID:input.projectID,teamID:input.teamID,canonicalRoot:input.canonicalRoot,planID:input.planID,planVersion:input.planVersion}}:result;
+  }
+  async dispatchMessages(){
+    if(this.dispatching)return;
+    this.dispatching=true;
+    try{
+      this.mutate(state=>{queueMessages(state);return {};});
+      while(this.read()?.collaboration?.enabled){
+        this.mutate(state=>{queueMessages(state);return {};});
+        const candidate=this.read()?.deliveries?.find(d=>d.status==='queued');
+        if(!candidate)break;
+        const state=this.read(),target=state.members.find(m=>memberID(m)===candidate.memberID),message=state.messages.find(m=>m.id===candidate.messageID);
+        try{
+          const session=await this.ctx.session.get({sessionID:candidate.sessionID});
+          if(!target||target.sessionID!==session.id||session.projectID!==state.projectID||session.agent!==target.agent||session.location.directory!==target.directory||session.location.workspaceID!==target.workspaceID||target.branch&&gitBinding(target.directory)!==target.branch)throw Error('PILOT_WAKE_BINDING_MISMATCH');
+          const admitted=this.mutate(s=>{
+            const d=s.deliveries.find(d=>d.promptID===candidate.promptID);
+            if(!s.collaboration?.enabled||d.status!=='queued')return {value:false};
+            d.status='submitting';return {value:true};
+          });
+          if(!admitted)continue;
+          const receipt=await this.ctx.session.prompt({sessionID:target.sessionID,id:candidate.promptID,delivery:'queue',text:`Team message ${message.id} from ${message.from} to ${message.to}:\n${message.text}\n\nReply with team_send to ${message.from}; broadcast only when needed. No reply required to acknowledgements. Read team_protocol with action=read payload={} before task changes. Chat grants no edit/shell/execution permission.`});
+          if(receipt.id!==candidate.promptID)throw Error('PILOT_WAKE_RECEIPT_MISMATCH');
+          this.mutate(s=>{s.deliveries.find(d=>d.promptID===candidate.promptID).status='sent';return {};});
+        }catch(error){this.mutate(s=>{const d=s.deliveries.find(d=>d.promptID===candidate.promptID);d.status=d.status==='submitting'?'uncertain':'error';d.error=String(error);return {};});}
+      }
+    }finally{this.dispatching=false;}
   }
   async worktreeExec(input,context){
     if(this.root.includes('owner-inbox'))throw Error('PEER_WORKTREE_LIVE_INBOX_FORBIDDEN');
     const member=await this.caller(context),state=this.read(),plan=state?.plans?.at(-1),policy=state?.executionPolicy;
     if(!state||state.mode!=='peer'||state.status!=='ready'||!member.branch||member.directory===this.root||['main','master'].includes(member.branch))throw Error('PEER_WORKTREE_ISOLATION_REQUIRED');
     if(!plan||plan.ownerDecision!=='approve'||plan.needsOwner||!policy||policy.revokedAt||policy.planID!==plan.planID||policy.planVersion!==plan.version||policy.digest!==plan.digest)throw Error('PEER_WORKTREE_POLICY_REQUIRED');
-    if(policy.signature!==undefined)verifyHostOwnerPolicy(state,policy);
+    verifyHostOwnerPolicy(state,policy);
     const task=state.tasks.find(t=>t.id===input?.taskID&&t.planID===plan.planID&&t.planVersion===plan.version);
     if(!task)throw Error('PEER_WORKTREE_TASK_NOT_FOUND');
     const git=(cwd,...args)=>execFileSync('git',['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','core.fsmonitor=false','-c','protocol.file.allow=never','-c',`user.name=${memberID(member)}`,'-c',`user.email=${memberID(member)}@localhost`,'-C',cwd,...args],{env:gitEnv(),encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
-    const runChecks=async cwd=>{
-      const commands=[];
-      for(const check of task.requiredChecks){
-        if(!/^node --test(?:\s+[A-Za-z0-9_./-]+)+$/.test(check))throw Error('PEER_WORKTREE_CHECK_FORBIDDEN');
-        const parts=check.split(/\s+/);
-        for(const rel of parts.slice(2))await assertScopedPath(cwd,rel);
-        const out=runInBwrapSandbox(cwd,parts.slice(1),{timeout:15000,forbiddenPaths:[this.directory,this.root]});
-        commands.push({command:check,exitCode:0,output:out.slice(0,4000)});
-      }
-      return commands;
-    };
+    const runChecks=cwd=>runRequiredChecks(cwd,task.requiredChecks,[this.directory,this.root]);
     if(input?.mode==='apply'){
       if(task.assignee!==memberID(member)||task.status!=='RUNNING'||task.executionState!=='outstanding'||!task.lease||task.lease.expiresAt<=Date.now())throw Error('PEER_WORKTREE_TASK_NOT_RUNNING');
+      const execution=state.executions?.findLast(e=>e.taskID===task.id&&e.scope==='worktree'&&e.state==='admitted-by-adapter');
+      if(!execution||execution.deadline<=Date.now()||execution.identity.ownershipGeneration!==task.ownershipGeneration||execution.identity.workRevision!==task.workRevision)throw Error('PEER_WORKTREE_EXECUTION_REQUIRED');
       if(!Array.isArray(input.files)||!input.files.length)throw Error('PEER_WORKTREE_FILES_REQUIRED');
-      const written=[];
+      const written=[],validated=[];
       for(const f of input.files){
         if(!f||typeof f.path!=='string'||typeof f.content!=='string'||!task.files.some(tf=>f.path===tf||f.path.startsWith(tf+'/')))throw Error('PEER_WORKTREE_FILE_OUT_OF_SCOPE');
         const abs=await assertScopedPath(member.directory,f.path);
+        validated.push({f,abs});
+      }
+      try{
+      // ponytail: clean fast-forward base only; divergent worktree needs explicit rework, never reset.
+      if(task.dependencies.length&&git(member.directory,'rev-parse','HEAD')!==git(this.root,'rev-parse','HEAD')){
+        if(git(member.directory,'status','--porcelain'))throw Error('PEER_WORKTREE_DIRTY');
+        git(member.directory,'merge','--ff-only',git(this.root,'rev-parse','HEAD'));
+        for(const {f,abs} of validated)if(await assertScopedPath(member.directory,f.path)!==abs)throw Error('PEER_WORKTREE_FILE_OUT_OF_SCOPE');
+      }
+      for(const {f,abs} of validated){
         mkdirSync(dirname(abs),{recursive:true});writeFileSync(abs,f.content,'utf8');written.push(f.path);
       }
       const commands=await runChecks(member.directory);
@@ -463,7 +683,26 @@ export class OfficialCoordinator {
       if(git(member.directory,'status','--porcelain'))git(member.directory,'commit','-m',`Task ${task.id} (${memberID(member)})`);
       const baseCommit=git(this.root,'rev-parse','HEAD'),sourceCommit=git(member.directory,'rev-parse','HEAD');
       const diff=git(member.directory,'show','--stat','--patch',sourceCommit);
+      this.mutate(s=>{
+        const row=s.executions.find(e=>e.id===execution.id),current=s.tasks.find(t=>t.id===task.id);
+        if(!row||row.state!=='admitted-by-adapter'||current.taskVersion!==task.taskVersion||s.executionPolicy?.revokedAt||row.deadline<=Date.now())throw Error('PEER_EXECUTION_STALE');
+        // Scoped worker stopped: node test child exited and local commit completed. Native session is NOT claimed stopped.
+        row.state='stop-verified';row.stopReceipt={executionID:row.id,identity:structuredClone(row.identity),receiptID:`worktree:${row.id}:${sourceCommit}`,scope:'worktree',sourceCommit,sandbox:'bwrap-v1',at:Date.now()};
+        current.executionState='stopped';return {};
+      });
       return {ok:true,mode:'apply',sandbox:'bwrap-v1',branch:member.branch,baseCommit,sourceCommit,files:written,commands,diff};
+      }catch(error){
+        // All scoped children are synchronous and exited before this catch. Failure proves scoped stop, not success.
+        this.mutate(s=>{
+          const row=s.executions?.find(e=>e.id===execution.id),current=s.tasks.find(t=>t.id===task.id);
+          if(row?.state==='admitted-by-adapter'&&current?.ownershipGeneration===execution.identity.ownershipGeneration&&current.workRevision===execution.identity.workRevision){
+            row.state='stop-verified';row.stopReceipt={executionID:row.id,identity:structuredClone(row.identity),receiptID:`worktree-failed:${row.id}`,scope:'worktree',outcome:'failed',sandbox:'bwrap-v1',at:Date.now()};
+            current.executionState='stopped';
+          }
+          return {};
+        });
+        throw error;
+      }
     }
     if(input?.mode==='verify'){
       if(task.reviewer!==memberID(member)||task.assignee===memberID(member)||!['SUBMITTED','REVIEW'].includes(task.status))throw Error('PEER_WORKTREE_REVIEWER_REQUIRED');
@@ -549,11 +788,15 @@ export async function registerOfficialCoordinator(ctx){
   // Check before constructor: constructor creates store directories.
   if(!approvedProject(ctx))return {read:()=>null,bootstrap:async()=>null,ownerSend:async()=>{throw Error('PILOT_PROJECT_NOT_APPROVED');}};
   const coordinator=new OfficialCoordinator(ctx);
+  const payloadProperties=Object.fromEntries([...new Set(Object.values(protocolFields).flat())].map(key=>[key,
+    ['planVersion','taskVersion','ownershipGeneration','round'].includes(key)?{type:'integer'}:
+    key==='approved'?{type:'boolean'}:
+    ['dependencies','files','requiredCapabilities','acceptanceCriteria','requiredChecks'].includes(key)?{type:'array',items:{type:'string'}}:{type:'string'}]));
   const retryBusy=async fn=>{for(let i=0;;i++)try{return await fn();}catch(e){if(e?.message!=='PILOT_STORE_BUSY_OR_RECOVERY_REQUIRED'||i>=30)throw e;await new Promise(r=>setTimeout(r,5));}};
   // Provisioning only through trusted Owner RPC; registration never creates native resources.
   await ctx.tool.transform(editor=>{
-    editor.add({name:'protocol',description:'Versioned shared plan/task protocol. Read policy first. Never grants native execution. Uses native caller identity.',options:{namespace:'team',codemode:false},
-      input:{type:'object',properties:{action:{type:'string'},payload:{type:'object',additionalProperties:true}},required:['action','payload'],additionalProperties:false},
+    editor.add({name:'protocol',description:'First call action="read", payload={} for current plan, policy and task graph. Never use read_policy/get_plan/policy. Mutations require unique requestID plus planID, planVersion, projectID, teamID, canonicalRoot from read.binding. propose requires text, dependencies (task IDs), files, requiredCapabilities, acceptanceCriteria, requiredChecks. Create DAG tasks with propose, NOT team_assign. Never grants native execution. Uses native caller identity.',options:{namespace:'team',codemode:false},
+      input:{type:'object',properties:{action:{type:'string',enum:['read','discuss','close_round','propose','bid','ready','claim','renew','release','start','submit','review','integrate','done','reassign_review','cancel','block','fail','reconcile']},payload:{type:'object',properties:payloadProperties,additionalProperties:false}},required:['action','payload'],additionalProperties:false},
       execute:async(input,context)=>({content:JSON.stringify(await retryBusy(()=>coordinator.protocol(input.action,input.payload,context)))})});
     editor.add({name:'worktree',description:'Scoped worktree file apply/test/commit for RUNNING assignee or verify for SUBMITTED independent reviewer.',options:{namespace:'team',codemode:false},
       input:{type:'object',properties:{mode:{type:'string',enum:['apply','verify']},taskID:{type:'string'},files:{type:'array',items:{type:'object',properties:{path:{type:'string'},content:{type:'string'}},required:['path','content'],additionalProperties:false}},sourceCommit:{type:'string'}},required:['mode','taskID'],additionalProperties:false},
@@ -583,10 +826,12 @@ export async function registerOfficialCoordinator(ctx){
     editor.add({name:'read_report',description:'Read team Markdown report by artifact ID. Does not read arbitrary paths.',options:{namespace:'team',codemode:false},input:{type:'object',properties:{id:{type:'string'}},required:['id'],additionalProperties:false},execute:async(input,context)=>{await coordinator.caller(context);return {content:JSON.stringify(readReport(coordinator.directory,coordinator.read(),ctx.location.project.id,input.id))};}});
     editor.add({name:'receipt',description:'Acknowledge a durable inbox message as this native peer. Not provider admission or execution.',options:{namespace:'team',codemode:false},input:{type:'object',properties:{messageID:{type:'string'},requestID:{type:'string'}},required:['messageID','requestID'],additionalProperties:false},execute:async(input,context)=>({content:JSON.stringify(await retryBusy(()=>coordinator.execute('receipt',input,context)))})});
     for(const action of ['send','inbox','ack','status','assign','claim','review'])editor.add({
-      name:action,description:`Pilot team ${action}. Inbox polling only; does not grant permissions or claim execution.`,options:{namespace:'team',codemode:false},
+      name:action,description:`Pilot team ${action}. send delivers to recipient and @peer mentions when Owner enabled collaboration; team broadcasts to other members. Reply to sender by default; avoid acknowledgement loops. Chat never grants code execution.`,options:{namespace:'team',codemode:false},
       input:{type:'object',properties:{recipient:{type:'string'},text:{type:'string',maxLength:10000},requestID:{type:'string',maxLength:160},taskID:{type:'string'},status:{type:'string'}},additionalProperties:false},
-      execute:async(input,context)=>{const result=await retryBusy(()=>coordinator.execute(action,input,context));return {content:JSON.stringify(ctx.options?.pilotWake===true&&action==='assign'?await coordinator.wake(result):result)};},
+       execute:async(input,context)=>{const result=await retryBusy(()=>coordinator.execute(action,input,context));if(action==='send')await coordinator.dispatchMessages();return {content:JSON.stringify(ctx.options?.pilotWake===true&&action==='assign'?await coordinator.wake(result):result)};},
     });
   });
+  // Resume only persisted queued rows; submitting/uncertain rows never replay automatically.
+  if(coordinator.read()?.collaboration?.enabled)await coordinator.dispatchMessages();
   return coordinator;
 }
