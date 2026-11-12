@@ -7,6 +7,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native-v0.8
     steps:
       - uses: actions/checkout@v4
         with:
@@ -15,6 +18,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: native-v0.8/package-lock.json
       - run: npm ci
       - run: npm test
       - run: npm run build

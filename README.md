@@ -1,23 +1,14 @@
-# OpenCode AI Team
+# OpenCode AI Team — Native Plugin
 
-Điều phối đội AI trên **OpenCode V2**: chia việc, làm việc trong Git worktree riêng, kiểm thử, review độc lập và tích hợp có kiểm soát.
+Plugin điều phối **4 Peer ngay trong OpenCode V2 Desktop**: chia task theo DAG, Git worktree riêng, kiểm thử trong sandbox, review độc lập và tích hợp có kiểm soát.
 
-[Native Plugin](native-v0.8/README.md) · [Tài liệu](docs/README.md) · [Kiến trúc Web/MCP](docs/TEAM-CHAT-ARCHITECTURE.md)
+[Cài đặt & kiến trúc](native-v0.8/README.md) · [Biên bản kiểm chứng](native-v0.8/docs/README.md)
 
-> **Đang phát triển.** Unit tests đạt không đồng nghĩa workflow đã được kiểm chứng toàn bộ. Native Plugin cần host OpenCode tương thích; chưa phải plugin cài lên mọi bản Desktop là chạy được.
+> **Đang phát triển.** Cần Desktop/Sidecar tương thích. Unit tests đạt không đồng nghĩa workflow đã được kiểm chứng toàn bộ.
 
-## Chọn cách sử dụng
+## Bắt đầu
 
-| Thành phần | Dùng khi | Mã nguồn |
-| --- | --- | --- |
-| **Native Plugin V0.8** | Điều phối 4 Peer ngay trong OpenCode Desktop; Git worktree, Owner approval, sandbox và review | [`native-v0.8/`](native-v0.8/) |
-| **Web Dashboard + MCP** | Điều phối qua giao diện web; Express, React, SQLite và MCP | [`apps/`](apps/) · [`packages/`](packages/) |
-
-Hai thành phần có bộ dependency và lệnh kiểm thử riêng. Web Dashboard không phải dependency để chạy Native Plugin.
-
-## Native Plugin — bắt đầu
-
-**Yêu cầu:** Linux, Git, Bubblewrap, Node.js 24 và OpenCode Desktop/Sidecar tương thích. Xem [yêu cầu host và cấu hình](native-v0.8/README.md#2-hướng-dẫn-cài-đặt--cấu-hình) trước khi cài.
+**Yêu cầu:** Linux, Git, Bubblewrap, Node.js 24 và OpenCode Desktop/Sidecar tương thích. Đọc [hướng dẫn Native](native-v0.8/README.md) trước khi cấu hình host.
 
 ```bash
 cd native-v0.8
@@ -26,51 +17,35 @@ npm run build
 npm test
 ```
 
-Build tạo bundle GUI trong `dist/`. Cấu hình plugin theo [hướng dẫn Native](native-v0.8/README.md), rồi mở panel **AI Team Chat** trên dự án Git.
+Build tạo bundle GUI trong `dist/`. Khai báo đường dẫn plugin theo hướng dẫn, rồi mở panel **AI Team Chat** trên dự án Git.
 
-### Đã kiểm chứng và giới hạn
+## Trạng thái
 
-- A/C của dự án test đã qua review độc lập và tích hợp canonical.
-- Đổi model của Peer idle không bị task outstanding khóa; session API và composer đã được kiểm chứng đồng bộ qua Desktop/reload.
-- B cũ còn thiếu stop proof; B/I/R chưa hoàn tất toàn luồng.
-- Đổi model khi phiên đang trả lời vẫn dùng model chờ; chưa hỗ trợ ngắt và đổi ngay.
-- Quota provider thật và E2E cuối chưa kiểm chứng đầy đủ. Xem [biên bản kiểm chứng](native-v0.8/docs/README.md).
+| Hạng mục | Kết quả |
+| --- | --- |
+| Kiểm thử plugin | 282/282 đạt; build đạt |
+| Review và integration live | A/C đã DONE với canonical receipt |
+| Đổi model khi idle | Đổi ngay; session API và composer đã kiểm chứng đồng bộ qua Desktop/reload |
+| Đổi model khi đang trả lời | Lưu model chờ; chưa có ngắt để đổi ngay |
+| Workflow cuối | B thiếu stop proof; B/I/R và E2E cuối chưa hoàn tất |
+| Quota provider | Có fault injection; chưa kiểm quota thật |
 
-## Web Dashboard + MCP — bắt đầu
-
-**Yêu cầu:** Node.js 24+, npm, Git và OpenCode V2 Service/Desktop.
-
-```bash
-npm ci
-cp .env.example .env
-./start.sh
-```
-
-Mở **http://127.0.0.1:4310**. Token đăng nhập nằm tại `.data/token`; không commit hoặc chia sẻ token.
-
-```bash
-npm test
-npm run build
-```
-
-User service tùy chọn: `bash scripts/service.sh install`. Kiểm tra bằng `bash scripts/service.sh status`.
-
-## Bản đồ repository
+## Cấu trúc
 
 ```text
-native-v0.8/     Native Plugin: source, tests, tài liệu và build riêng
-apps/server/    Web API, SQLite store và OpenCode dispatcher
-apps/web/       React dashboard
-packages/       Shared schema và MCP server
-tests/          Kiểm thử Web/MCP
-scripts/        Vận hành Web Dashboard
-docs/           Mục lục và kiến trúc
-.github/        GitHub Actions
+native-v0.8/
+  src/          Coordinator, Owner bridge, sandbox và Desktop GUI
+  tests/        Unit, integration, security và fault-injection tests
+  scripts/      Đóng gói broker
+  docs/         Biên bản kiểm chứng và giới hạn
+  README.md     Hướng dẫn cài đặt và kiến trúc
+.github/        CI cho Native Plugin
 ```
 
-## Quy tắc an toàn
+Repository hiện chỉ duy trì Native Plugin. Web Dashboard/MCP cũ đã bỏ khỏi `main`; có thể truy hồi qua lịch sử Git.
+
+## An toàn
 
 - Owner approval, execution authorization và model selection là các trạng thái riêng.
-- Task cần stop proof, required checks, review độc lập và canonical receipt; không coi hết lease là đã dừng.
-- Không commit `.env`, token, credentials, runtime state, backup hay `node_modules`.
-- Giữ lockfile cho cả hai bộ dependency. Không xóa fixture hoặc module chỉ vì không xuất hiện trên giao diện.
+- Task cần stop proof, required checks, review độc lập và canonical receipt; hết lease không chứng minh đã dừng.
+- Không commit credentials, token, runtime state, backup hoặc `node_modules`.
