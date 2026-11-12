@@ -50,11 +50,11 @@ test('current native composer validates idle and bindings, readback, never creat
   const screen={composer:{setModel:m=>{sets++;actual=m;return true},model:()=>actual}};
   const ctx={sessions:{current:()=>current},screen:{current:()=>screen}};
   const scoped={...team,tasks:[],messages:[]};
-  await assert.rejects(selectCurrentComposer(ctx,{...team,tasks:undefined},member,DEFAULT_MODELS.worker,catalog),/SESSION_BUSY/);
+   assert.equal((await selectCurrentComposer(ctx,{...team,tasks:[{assignee:member.id??member.role,status:'RUNNING',executionState:'outstanding'}]},member,DEFAULT_MODELS.worker,catalog)).modelID,DEFAULT_MODELS.worker.id);
   assert.equal((await selectCurrentComposer(ctx,scoped,member,DEFAULT_MODELS.worker,catalog)).modelID,DEFAULT_MODELS.worker.id);
   active={[member.sessionID]:{type:'running'}};
   await assert.rejects(selectCurrentComposer(ctx,team,member,DEFAULT_MODELS.worker,catalog),/SESSION_BUSY/);
-  assert.equal(sets,1);
+   assert.equal(sets,2);
   active=null;
   await assert.rejects(selectCurrentComposer(ctx,team,member,DEFAULT_MODELS.worker,catalog),/SESSION_BUSY/);
   active={};native.time={};

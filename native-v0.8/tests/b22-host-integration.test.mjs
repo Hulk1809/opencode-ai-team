@@ -338,8 +338,7 @@ test('B2.2 Phase 3: Atomic Model Selection & Admission 10-scenario race matrix',
 
   // 3. Active session / in-flight turn blocks model switch and blocks new admission
   active['ses_peer_1'] = {status: 'running'};
-  await assert.rejects(
-    () => coordinator.selectModel({
+  const queued = await coordinator.selectModel({
       operation: 'selectModel',
       requestID: 'race-active-1',
       generation: PEER_GENERATION,
@@ -348,9 +347,9 @@ test('B2.2 Phase 3: Atomic Model Selection & Admission 10-scenario race matrix',
       sessionID: 'ses_peer_1',
       expectedModel: peer1Target,
       model: initialModel,
-    }),
-    /MODEL_SESSION_ACTIVE/
-  );
+    });
+  assert.equal(queued.status, 'QUEUED');
+  assert.equal(queued.executionAuthorized, false);
   await assert.rejects(
     () => coordinator.verifyAdmissionPolicy({teamID: 'team_b22', generation: PEER_GENERATION, sessionID: 'ses_peer_1'}),
     /ADMISSION_SESSION_BUSY/

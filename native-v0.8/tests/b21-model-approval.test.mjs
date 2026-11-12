@@ -26,11 +26,16 @@ test('B2.1 model persistence validates binding, stale selection, activity and du
   const c=Object.create(OfficialCoordinator.prototype);c.read=()=>structuredClone(state);c.mutate=f=>{const next=structuredClone(state),r=f(next);state=next;return r.value};
   c.ctx={model:{list:async()=>[{providerID:'test',id:'new',enabled:true,variants:[{id:'default'}]}]},session:{get:async()=>structuredClone(session),active:async()=>busy?{s:{type:'running'}}:{},switchModel:async({model})=>{calls++;session.model=model}}};
   const input={operation:'selectModel',requestID:'r',generation:'g',teamID:'t',sessionID:'s',expectedModel:session.model,model:{providerID:'test',id:'new',variant:'default'}};
-  busy=true;await assert.rejects(c.selectModel(input),/ACTIVE/);assert.equal(calls,0);busy=false;
+   busy=true;assert.equal((await c.selectModel(input)).status,'QUEUED');assert.equal(calls,0);assert.equal(session.model.id,'old');assert.equal(state.members[0].queuedModel.desired.id,'new');busy=false;
+   state.tasks=[{assignee:'peer-1',executionState:'outstanding'}];
+   busy=true;assert.equal((await c.selectModel(input)).status,'QUEUED');assert.equal(calls,0);busy=false;
+   state.tasks=[{assignee:'peer-1',executionState:'outstanding'}];
   await assert.rejects(c.selectModel({...input,generation:'stale'}),/INVALID/);
   await assert.rejects(c.selectModel({...input,teamID:'other'}),/BINDING/);
   await assert.rejects(c.selectModel({...input,model:{providerID:'test',id:'missing'}}),/UNAVAILABLE/);
-  assert.equal((await c.selectModel(input)).status,'APPLIED');assert.equal(calls,1);
+   assert.equal((await c.selectModel(input)).status,'APPLIED');assert.equal(calls,1);
+   assert.equal(state.tasks[0].executionState,'outstanding');
+   assert.equal(state.members[0].queuedModel,undefined);
   await assert.rejects(c.selectModel(input),/STALE/);assert.equal(calls,1);
 });
 
@@ -41,4 +46,22 @@ test('B2.1 Owner can review initial plan without synthetic risk; settled revisio
   assert.equal(reviewPlan(s,i).id,s.approvals[0].id);
   assert.throws(()=>reviewPlan(s,{...i,requestID:'r2',decision:'reject'}),/NOT_REQUIRED/);
   assert.throws(()=>reviewPlan(s,{...i,requestID:'r3',digest:'old'}),/STALE/);
+});
+
+test('model recovery rejects unknown activity and retries provider failure without releasing task',async()=>{
+  let state={generation:'g',teamID:'t',projectID:'p',status:'ready',tasks:[{id:'b',assignee:'peer-1',executionState:'outstanding'}],members:[{id:'peer-1',sessionID:'s',directory:'/repo',agent:'build'}]};
+  let session={id:'s',projectID:'p',agent:'build',location:{directory:'/repo'},model:{providerID:'test',id:'old',variant:'default'}},activity=null,calls=0,quota=true;
+  const c=Object.create(OfficialCoordinator.prototype);
+  c.read=()=>structuredClone(state);c.mutate=f=>{const next=structuredClone(state),r=f(next);state=next;return r.value};
+  c.ctx={model:{list:async()=>[{providerID:'test',id:'new',enabled:true,variants:[{id:'default'}]}]},session:{get:async()=>structuredClone(session),active:async()=>activity,switchModel:async({model})=>{calls++;if(quota)throw Error('429 quota exhausted');session.model=model}}};
+  const input={operation:'selectModel',requestID:'r',generation:'g',teamID:'t',sessionID:'s',expectedModel:session.model,model:{providerID:'test',id:'new',variant:'default'}};
+  for(const invalid of [null,undefined,[],false]){
+    activity=invalid;await assert.rejects(c.selectModel(input),/MODEL_SESSION_ACTIVITY_UNKNOWN/);
+  }
+  assert.equal(calls,0);assert.equal(state.members[0].modelPreference,undefined);
+  activity={s:null};assert.equal((await c.selectModel(input)).status,'QUEUED');assert.equal(calls,0);
+  activity={};await assert.rejects(c.selectModel(input),/429 quota exhausted/);
+  assert.equal(state.members[0].modelPreference.status,'BLOCKED');assert.equal(session.model.id,'old');
+  quota=false;assert.equal((await c.selectModel({...input,requestID:'retry'})).status,'APPLIED');
+  assert.equal(calls,2);assert.equal(state.tasks[0].executionState,'outstanding');assert.equal(state.members[0].queuedModel,undefined);
 });

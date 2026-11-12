@@ -411,14 +411,26 @@ export class OfficialCoordinator {
     if(state.teamID!==input.teamID||!member||(input.memberID&&memberID(member)!==input.memberID)||state.status!=='ready')throw Error('MODEL_BINDING_MISMATCH');
     const catalog=publicModels(await this.ctx.model.list()),model=input.model;
     if(!model||Object.keys(model).some(k=>!['providerID','id','variant'].includes(k))||!catalog.some(m=>m.providerID===model.providerID&&m.id===model.id&&(model.variant===undefined||m.variants.includes(model.variant))))throw Error('MODEL_UNAVAILABLE');
-    const inspect=async()=>{
-      const s=await this.ctx.session.get({sessionID:member.sessionID}),active=await (this.ctx.session.active?.()??{});
+    const inspect=async(allowBusy=false)=>{
+      const s=await this.ctx.session.get({sessionID:member.sessionID}),activity=await this.ctx.session.active?.();
+      const active=activity?.data??activity;
+      if(!active||typeof active!=='object'||Array.isArray(active))throw Error('MODEL_SESSION_ACTIVITY_UNKNOWN');
       if(s.id!==member.sessionID||s.projectID!==state.projectID||s.agent!==member.agent||s.location.directory!==member.directory||s.location.workspaceID!==member.workspaceID)throw Error('MODEL_BINDING_MISMATCH');
-      if((active?.data??active)?.[member.sessionID]||this.read().tasks.some(t=>t.assignee===memberID(member)&&t.executionState==='outstanding'))throw Error('MODEL_SESSION_ACTIVE');
-      return s;
+      // Model configuration is independent of task stop proof; native switchModel serializes against active turns.
+      const busy=Object.hasOwn(active,member.sessionID);
+      if(busy&&!allowBusy)throw Error('MODEL_SESSION_ACTIVE');
+      return {...s,modelSwitchBusy:busy};
     };
-    const before=await inspect();
+    const before=await inspect(true);
     if(!sameModel(before.model,input.expectedModel))throw Error('MODEL_SELECTION_STALE');
+    // ponytail: explicit Apply after safe stop; no automatic switch or model invocation.
+    if(before.modelSwitchBusy)return this.mutate(s=>{
+      const m=s.members.find(m=>m.sessionID===input.sessionID);
+      if(s.generation!==input.generation||s.teamID!==input.teamID||!m)throw Error('MODEL_SELECTION_STALE');
+      if(m.modelPreference?.status==='PENDING')throw Error('MODEL_SELECTION_RECONCILIATION_REQUIRED');
+      m.queuedModel={desired:{...model},status:'QUEUED',requestID:input.requestID,at:new Date().toISOString(),executionAuthorized:false};
+      return {value:m.queuedModel};
+    });
     this.mutate(s=>{
       if(s.generation!==input.generation||s.teamID!==input.teamID)throw Error('MODEL_SELECTION_STALE');
       const m=s.members.find(m=>m.sessionID===input.sessionID);
@@ -438,6 +450,7 @@ export class OfficialCoordinator {
         if(s.generation!==input.generation||s.teamID!==input.teamID||m?.modelPreference?.requestID!==input.requestID)throw Error('MODEL_SELECTION_STALE');
         m.modelVersion=m.modelPreference.version;
         m.modelDefault={...actual.model};
+        delete m.queuedModel;
         const receipt={id:`model_receipt_${randomUUID()}`,requestID:input.requestID,projectID:s.projectID,teamID:s.teamID,memberID:memberID(m),sessionID:m.sessionID,generation:s.generation,version:m.modelVersion,previous:before.model,selected:actual.model,status:'APPLIED',composerStatus:'PENDING',executionAuthorized:false,capabilityID:input.capabilityID??null,at:new Date().toISOString()};
         m.modelPreference={...m.modelPreference,status:'APPLIED',observed:actual.model,receiptID:receipt.id,at:receipt.at};
         s.modelReceipts??=[];s.modelReceipts.push(receipt);

@@ -17,7 +17,8 @@ test('routing fails closed for missing admission data, outstanding execution and
   assert.equal(routingAdmissionBlocked({},m),true);assert.equal(routingAdmissionBlocked(team,m),false);
   assert.equal(routingAdmissionBlocked({...team,mode:'peer'},m),true);
   assert.equal(routingAdmissionBlocked({...team,mode:'peer',runtime:{protocolVersion:1}},m),false);
-  for(const task of [{assignee:'peer-1',status:'CLAIMED'},{assignee:'peer-2',status:'CANCELLED',executionState:'outstanding'}])assert.equal(routingAdmissionBlocked({...team,tasks:[task]},m),true);
+  for(const task of [{assignee:'peer-1',status:'CLAIMED'},{assignee:'peer-1',status:'CANCELLED',executionState:'outstanding'}])assert.equal(routingAdmissionBlocked({...team,tasks:[task]},m),true);
+  assert.equal(routingAdmissionBlocked({...team,tasks:[{assignee:'peer-2',status:'RUNNING',executionState:'outstanding'}]},m),false);
   assert.equal(routingAdmissionBlocked({...team,messages:[{to:'team',wake:{status:'uncertain'}}]},m),true);
 });
 test('safe report subset treats HTML, links and diagrams as text, never executable markup',()=>{

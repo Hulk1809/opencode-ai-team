@@ -1,4 +1,3 @@
-import {routingAdmissionBlocked} from './peer-presentation.mjs';
 export const DEFAULT_MODELS=Object.freeze({
   admin:Object.freeze({providerID:'taile',id:'cx/gpt-6.1-sol',variant:'medium'}),
   worker:Object.freeze({providerID:'taile',id:'ag/gemini-3.8-flash-medium',variant:'medium'})
@@ -50,7 +49,7 @@ export async function selectCurrentComposer(ctx,team,member,selection,catalog){
    if(!active||typeof active!=='object'||Array.isArray(active))throw Error('ROUTING_SESSION_BUSY_OR_UNKNOWN');
    if(ctx.sessions.current()!==current||ctx.screen.current()!==screen)throw Error('ROUTING_NATIVE_BINDING_MISMATCH');
    // time.idle is the last terminal transition, not current activity; new sessions have none.
-    if(Object.hasOwn(active,member.sessionID)||routingAdmissionBlocked(team,member))throw Error('ROUTING_SESSION_BUSY_OR_UNKNOWN');
+     if(Object.hasOwn(active,member.sessionID))throw Error('ROUTING_SESSION_BUSY_OR_UNKNOWN');
   // Current composer only: supported native picker semantics, not arbitrary-session switchModel or a prompt submission.
   if(!screen.composer.setModel({providerID:selection.providerID,modelID:selection.id,...(selection.variant==null?{}:{variant:selection.variant})}))throw Error('ROUTING_COMPOSER_REJECTED');
   const actual=screen.composer.model();

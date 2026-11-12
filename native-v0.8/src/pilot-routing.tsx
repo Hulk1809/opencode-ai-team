@@ -1,6 +1,6 @@
 import {usePlugin} from '@opencode/plugin/gui'
 import {Schema} from 'effect'
-import {createEffect,createMemo,createSignal,For,Show} from 'solid-js'
+import {createEffect,createMemo,createSignal,For,Show,on} from 'solid-js'
 import {DEFAULT_MODELS,routeModel,routingKey,selectCurrentComposer,sameModel} from './model-routing.mjs'
 import {checkedTeam,pilotError} from './pilot-ui.mjs'
 import {routingOptions} from './routing-filters.mjs'
@@ -16,7 +16,7 @@ const modelText=(model:any)=>model?`${model.providerID}/${model.id??model.modelI
 export function PeerModelSelector(props:{team:any,member:any,serverID:string,onClose?:()=>void,onApplied?:()=>void}){
   const ctx=usePlugin()
   const catalog=()=>props.team?.modelCatalog??[]
-  const currentSelection=()=>props.member?.model?.selection??props.member?.modelPreference??props.member?.modelDefault??DEFAULT_MODELS.worker
+  const currentSelection=()=>props.member?.model?.selection??props.member?.modelDefault??DEFAULT_MODELS.worker
   const providers=createMemo(()=>[...new Set<string>(catalog().map((m:any)=>m.providerID))])
   const [providerID,setProviderID]=createSignal(currentSelection()?.providerID??providers()[0]??'')
   const providerModels=createMemo(()=>catalog().filter((m:any)=>!providerID()||m.providerID===providerID()))
@@ -26,12 +26,12 @@ export function PeerModelSelector(props:{team:any,member:any,serverID:string,onC
   const [variant,setVariant]=createSignal(currentSelection()?.variant??variants()[0]??'default')
   const [applying,setApplying]=createSignal(false),[error,setError]=createSignal(''),[notice,setNotice]=createSignal('')
 
-  createEffect(()=>{
+  createEffect(on(()=>JSON.stringify([props.member?.sessionID,currentSelection()]),()=>{
     const sel=currentSelection()
     if(sel?.providerID)setProviderID(sel.providerID)
     if(sel?.id||sel?.modelID)setModelID(sel.id??sel.modelID)
     if(sel?.variant)setVariant(sel.variant)
-  })
+  }))
 
   function handleProviderChange(nextProvider:string){
     setProviderID(nextProvider)
@@ -61,7 +61,7 @@ export function PeerModelSelector(props:{team:any,member:any,serverID:string,onC
     const m=props.member
     const nativeSel=m?.model?.selection
     if(!props.team?.modelSwitch?.allowed)return {label:'BLOCKED',tone:'blocked',detail:OWNER_MODEL_CONTEXT_BLOCKED}
-    if(m?.activity==='running'||routingAdmissionBlocked(props.team,m))return {label:'BLOCKED',tone:'blocked',detail:'Session đang bận hoặc có task/wake outstanding'}
+    if(m?.activity==='running')return {label:'QUEUE',tone:'pending',detail:'Model đang trả lời. Lựa chọn chờ không thay lượt đang chạy.'}
     if(!nativeSel)return {label:'PENDING',tone:'pending',detail:'Chưa có session model readback'}
     if(!sameModel(proposed(),nativeSel))return {label:'PENDING',tone:'pending',detail:'Bản chọn mới chưa Apply xuống host CAS'}
     if(m?.model?.composerVerified||ctx.sessions.current()?.id===m?.sessionID&&sameModel(nativeSel,ctx.screen.current()?.composer?.model?.()&&{providerID:ctx.screen.current()!.composer.model()!.providerID,id:ctx.screen.current()!.composer.model()!.modelID,variant:ctx.screen.current()!.composer.model()!.variant??'default'})){
@@ -80,7 +80,7 @@ export function PeerModelSelector(props:{team:any,member:any,serverID:string,onC
       const fresh=checkedTeam(await current.server.client.rpc(PilotRPC).snapshot({directory:team.canonicalRoot??current.directory},{location:{directory:team.canonicalRoot??current.directory}}))
       if(fresh.projectID!==team.projectID||fresh.teamID!==team.teamID||ctx.sessions.current()!==current)throw Error('ROUTING_NATIVE_BINDING_MISMATCH')
       const native=fresh.members.find((m:any)=>m.sessionID===member.sessionID)
-      if(!native||native.activity==='running')throw Error('MODEL_SESSION_ACTIVE')
+       if(!native)throw Error('MODEL_BINDING_MISMATCH')
       const requestID=crypto.randomUUID()
       await ctx.main(PilotOwner).selectModel({
         sessionID:current.id,
@@ -94,7 +94,13 @@ export function PeerModelSelector(props:{team:any,member:any,serverID:string,onC
         modelJSON:JSON.stringify(selection)
       })
       const readback=checkedTeam(await current.server.client.rpc(PilotRPC).snapshot({directory:team.canonicalRoot},{location:{directory:team.canonicalRoot}}))
-      const observed=readback.members.find((m:any)=>m.sessionID===member.sessionID)?.model?.selection
+       const updated=readback.members.find((m:any)=>m.sessionID===member.sessionID)
+       if(updated?.queuedModel?.requestID===requestID&&sameModel(updated.queuedModel.desired,selection)){
+         setNotice('Đã lưu model chờ; model hiện tại chưa đổi. Khi Peer dừng an toàn, chọn model chờ rồi bấm Apply. Không tự gửi prompt.')
+         props.onApplied?.()
+         return
+       }
+       const observed=updated?.model?.selection
       if(!sameModel(observed,{...selection,variant:selection.variant??'default'}))throw Error('MODEL_READBACK_MISMATCH')
       if(ctx.sessions.current()?.id===member.sessionID){
         await selectCurrentComposer(ctx,readback,member,observed,catalog())
@@ -119,7 +125,8 @@ export function PeerModelSelector(props:{team:any,member:any,serverID:string,onC
     <div class="b31-model-selector-head">
       <div>
         <strong>Model Selector — {memberLabel(props.member)}</strong>
-        <small class="pilot-muted">Current: {modelText(props.member?.model?.selection??props.member?.modelDefault)}</small>
+         <small class="pilot-muted">Current: {modelText(props.member?.model?.selection??props.member?.modelDefault)}</small>
+         <Show when={props.member?.queuedModel}><small role="status">Model chờ: {modelText(props.member.queuedModel.desired)} · chưa áp dụng</small><button type="button" onClick={()=>{const m=props.member.queuedModel.desired;setProviderID(m.providerID);setModelID(m.id);setVariant(m.variant??'default')}}>Chọn model chờ</button></Show>
       </div>
       <span class={`b31-status-pill is-${statusBadge().tone}`} role="status">{statusBadge().label}</span>
     </div>
@@ -151,15 +158,15 @@ export function PeerModelSelector(props:{team:any,member:any,serverID:string,onC
     <div class="b31-model-actions">
       <Show when={props.onClose}><button type="button" class="b31-btn-ghost" onClick={props.onClose}>Cancel</button></Show>
       <Show when={props.team?.modelSwitch?.allowed} fallback={<button type="button" disabled title={OWNER_MODEL_CONTEXT_BLOCKED}>Apply · BLOCKED</button>}>
-        <button type="button" class="b31-btn-primary" aria-label={`Apply model ${props.member.role}`} disabled={applying()||props.member?.activity==='running'||routingAdmissionBlocked(props.team,props.member)} onClick={()=>void applyModel()}>
-          {applying()?'Applying…':'Apply'}
+         <button type="button" class="b31-btn-primary" aria-label={`Apply model ${props.member.role}`} disabled={applying()} onClick={()=>void applyModel()}>
+           {applying()?'Đang lưu…':props.member?.activity==='running'?'Lưu model chờ':'Đổi model ngay'}
         </button>
       </Show>
     </div>
   </div>
 }
 
-export function PilotRouting(props:{team:any,serverID:string}){
+export function PilotRouting(props:{team:any,serverID:string,onApplied?:()=>void}){
   const ctx=usePlugin()
   const [type,setType]=createSignal('read'),[role,setRole]=createSignal('worker-1')
   const [provider,setProvider]=createSignal(''),[search,setSearch]=createSignal('')
@@ -200,7 +207,7 @@ export function PilotRouting(props:{team:any,serverID:string}){
       const fresh=checkedTeam(await current.server.client.rpc(PilotRPC).snapshot({directory:team.canonicalRoot??current.directory},{location:{directory:team.canonicalRoot??current.directory}}))
       if(fresh.projectID!==team.projectID||fresh.teamID!==team.teamID||ctx.sessions.current()!==current)throw Error('ROUTING_NATIVE_BINDING_MISMATCH')
        const native=fresh.members.find((m:any)=>m.sessionID===member.sessionID)
-       if(!native||native.activity==='running')throw Error('MODEL_SESSION_ACTIVE')
+       if(!native)throw Error('MODEL_BINDING_MISMATCH')
        const requestID=crypto.randomUUID()
        await ctx.main(PilotOwner).selectModel({
          sessionID:current.id,
@@ -214,7 +221,13 @@ export function PilotRouting(props:{team:any,serverID:string}){
          modelJSON:JSON.stringify(selection)
        })
        const readback=checkedTeam(await current.server.client.rpc(PilotRPC).snapshot({directory:team.canonicalRoot},{location:{directory:team.canonicalRoot}}))
-       const observed=readback.members.find((m:any)=>m.sessionID===member.sessionID)?.model?.selection
+       const updated=readback.members.find((m:any)=>m.sessionID===member.sessionID)
+       if(updated?.queuedModel?.requestID===requestID&&sameModel(updated.queuedModel.desired,selection)){
+         setNotice('Đã lưu model chờ; model hiện tại chưa đổi. Khi Peer dừng an toàn, chọn model chờ rồi bấm Apply. Không tự gửi prompt.')
+         props.onApplied?.()
+         return
+       }
+       const observed=updated?.model?.selection
        if(!sameModel(observed,{...selection,variant:selection.variant??'default'}))throw Error('MODEL_READBACK_MISMATCH')
        if(ctx.sessions.current()?.id===member.sessionID){
          await selectCurrentComposer(ctx,readback,member,observed,catalog())

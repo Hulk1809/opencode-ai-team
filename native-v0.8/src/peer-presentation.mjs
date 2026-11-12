@@ -10,7 +10,7 @@ export function uniqueMessages(messages){const seen=new Set();return messages.fi
 export function routingAdmissionBlocked(team,member){
   if(team.mode==='peer'&&team.runtime?.protocolVersion!==1)return true;
   if(!Array.isArray(team.tasks)||!Array.isArray(team.messages))return true;
-  return team.tasks.some(t=>t.executionState==='outstanding'||memberTasks({tasks:[t]},member).length&&['CLAIMED','RUNNING','REWORK','BLOCKED'].includes(taskState(t)))||
+  return team.tasks.some(t=>memberTasks({tasks:[t]},member).length&&(t.executionState==='outstanding'||['CLAIMED','RUNNING','REWORK','BLOCKED'].includes(taskState(t))))||
     team.messages.some(m=>['team',member.id,member.role].includes(m.to)&&['submitting','admitted','uncertain'].includes(m.wake?.status));
 }
 // ponytail: safe Markdown subset, no HTML, images, links, or embedded diagrams; extend with vetted host sanitizer contract.
