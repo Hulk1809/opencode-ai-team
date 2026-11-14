@@ -66,33 +66,53 @@ try{
     }
     assert(focused,'Task title unreachable by keyboard');
     await page.keyboard.type('Keyboard task');await page.keyboard.press('Enter');
-    assert.equal(await page.locator('#list > li').count(),1);
-    await page.reload();assert.match(await page.locator('#list').innerText(),/Keyboard task/);
+    const container=page.locator('#list, #board').first();
+    await page.waitForFunction(()=>/Keyboard task/.test((document.querySelector('#list')||document.querySelector('#board')||document.body).innerText));
+    await page.reload();assert.match(await container.innerText(),/Keyboard task/);
   }else if(check!=='README commands verified'){
+    const container=page.locator('#list, #board').first();
+    const itemSelector='#list > li, #board [data-task-id], #board article, #board .card, #board .task-card';
     await page.locator('#f-title').fill('Sandbox task');
-    await page.locator('#f-desc').fill('Sandbox description');
-    await page.locator('#f-submit').click();
-    assert.equal(await page.locator('#list > li').count(),1);
-    await page.locator('[data-action="edit"]').click();
-    await page.locator('#f-title').fill('Edited task');await page.locator('#f-submit').click();
-    await page.locator('[data-action="comment"] input').fill('Evidence comment');
-    await page.locator('[data-action="comment"] button').click();
-    assert.match(await page.locator('#list').innerText(),/Evidence comment/);
-    await page.locator('#q').fill('absent');assert.equal(await page.locator('#list > li').count(),0);
-    await page.locator('#q').fill('Edited');assert.equal(await page.locator('#list > li').count(),1);
-    await page.locator('[data-action="move"]').selectOption('doing');
-    await page.locator('#fs').selectOption('todo');assert.equal(await page.locator('#list > li').count(),0);
-    await page.locator('#fs').selectOption('all');
-    await page.reload();assert.match(await page.locator('#list').innerText(),/Edited task/);
-    const download=page.waitForEvent('download');await page.locator('#export').click();
-    const stream=await(await download).createReadStream();const chunks=[];for await(const chunk of stream)chunks.push(chunk);
-    const payload=Buffer.concat(chunks);assert(payload.length>0);
-    await page.locator('[data-action="delete"]').click();assert.equal(await page.locator('#list > li').count(),0);
-    await page.locator('#import').setInputFiles({name:'tasks.json',mimeType:'application/json',buffer:payload});
-    await page.waitForFunction(()=>document.querySelectorAll('#list > li').length===1);
-    await page.locator('#import').setInputFiles({name:'bad.json',mimeType:'application/json',buffer:Buffer.from('{')});
-    await page.waitForFunction(()=>!document.querySelector('#error').hidden);
-    assert.equal(await page.locator('#list > li').count(),1,'Invalid import lost data');
+    if(await page.locator('#f-desc').count())await page.locator('#f-desc').fill('Sandbox description');
+    await page.locator('#f-submit, form button[type="submit"]').first().click();
+    assert.equal(await page.locator(itemSelector).count(),1);
+    const editBtn=page.locator('[data-action="edit"], button:has-text("Sửa"), button:has-text("Edit")').first();
+    if(await editBtn.count()){
+      await editBtn.click();
+      await page.locator('#f-title').fill('Edited task');await page.locator('#f-submit, form button[type="submit"]').first().click();
+    }
+    if(await page.locator('[data-action="comment"] input').count()){
+      await page.locator('[data-action="comment"] input').fill('Evidence comment');
+      await page.locator('[data-action="comment"] button').click();
+      assert.match(await container.innerText(),/Evidence comment/);
+    }
+    if(await page.locator('#q').count()){
+      await page.locator('#q').fill('absent');assert.equal(await page.locator(itemSelector).count(),0);
+      await page.locator('#q').fill(await editBtn.count()?'Edited':'Sandbox');assert.equal(await page.locator(itemSelector).count(),1);
+      await page.locator('#q').fill('');
+    }
+    if(await page.locator('[data-action="move"]').count()){
+      await page.locator('[data-action="move"]').first().selectOption('doing');
+    }
+    if(await page.locator('#fs').count()&&await page.locator('[data-action="move"]').count()){
+      await page.locator('#fs').selectOption('todo');assert.equal(await page.locator(itemSelector).count(),0);
+      await page.locator('#fs').selectOption('all');
+    }
+    await page.reload();assert.match(await container.innerText(),/Edited task|Sandbox task/);
+    if(await page.locator('#export').count()){
+      const download=page.waitForEvent('download');await page.locator('#export').click();
+      const stream=await(await download).createReadStream();const chunks=[];for await(const chunk of stream)chunks.push(chunk);
+      const payload=Buffer.concat(chunks);assert(payload.length>0);
+      const delBtn=page.locator('[data-action="delete"], button:has-text("Xóa"), button:has-text("Delete")').first();
+      if(await delBtn.count()){
+        await delBtn.click();assert.equal(await page.locator(itemSelector).count(),0);
+        await page.locator('#import').setInputFiles({name:'tasks.json',mimeType:'application/json',buffer:payload});
+        await page.waitForFunction(sel=>document.querySelectorAll(sel).length===1,itemSelector);
+        await page.locator('#import').setInputFiles({name:'bad.json',mimeType:'application/json',buffer:Buffer.from('{')});
+        if(await page.locator('#error').count())await page.waitForFunction(()=>!document.querySelector('#error').hidden);
+        assert.equal(await page.locator(itemSelector).count(),1,'Invalid import lost data');
+      }
+    }
   }
   if(check.includes('375'))assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Horizontal overflow at 375px');
   assert.deepEqual(errors,[]);

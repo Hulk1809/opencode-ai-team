@@ -37,6 +37,10 @@ test('signed Owner policy grants scoped start once; tampering, replay, revocatio
   c.directory=dir+'/store';mkdirSync(c.directory);c.caller=async()=>member;
   await assert.rejects(c.worktreeExec({mode:'apply',taskID:'task',files:[{path:'check.test.js',content:'must not write'},{path:'outside.js',content:'no'}]},{}),/OUT_OF_SCOPE/);
   assert.throws(()=>readFileSync(member.directory+'/check.test.js'),/ENOENT/);
+  writeFileSync(dir+'/check.test.js','// initial QA file\n');git('add','check.test.js');git('commit','-m','QA baseline');
+  git('-C',member.directory,'merge','--ff-only',git('rev-parse','HEAD'));
+  writeFileSync(member.directory+'/check.test.js','// failed QA draft retained\n');
+  writeFileSync(dir+'/dependency.txt','fixed dependency\n');git('add','dependency.txt');git('commit','-m','dependency fixed');
   const applied=await c.worktreeExec({mode:'apply',taskID:'task',files:[{path:'check.test.js',content:"const assert=require('node:assert/strict');assert.equal(2+2,4);"}]},{});
   assert.equal(applied.sandbox,'bwrap-v1');assert.match(applied.sourceCommit,/^[a-f0-9]{40}$/);
   assert.equal(applied.commands[0].command,'node --test');assert.equal(applied.commands[0].exitCode,0);

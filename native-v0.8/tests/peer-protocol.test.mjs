@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {spawn} from 'node:child_process';
-import {ingestPlan,protocolAction,DISCUSSION_ROUNDS,ROUND_MS,LEASE_MS} from '../src/peer-protocol.mjs';
-import {OfficialCoordinator} from '../src/official-coordinator.mjs';
+import {ingestPlan,protocolAction,claimant,routeDefects,DISCUSSION_ROUNDS,ROUND_MS,LEASE_MS} from '../src/peer-protocol.mjs';
+import {OfficialCoordinator,runQaBrokeredCommand} from '../src/official-coordinator.mjs';
+import {reportBody} from '../src/pilot-reports.mjs';
 
 function fixture(){
   const ctx={root:'/project',projectID:'project',teamID:'team'};
@@ -18,6 +19,24 @@ function fixture(){
   const close=()=>{for(let i=0;i<DISCUSSION_ROUNDS;i++){now+=ROUND_MS;call('peer-1','close_round',{round:i+1});}};
   return {ctx,p,source,payload,call,taskInput,propose,close,get state(){return state;},set now(n){now=n;},get now(){return now;}};
 }
+
+test('slow native turns retain bounded lease; expiry fences start, renew and unsafe recovery',()=>{
+  const f=fixture();let t=f.propose();f.close();t=f.call('peer-1','ready',f.taskInput(t));
+  t=f.call('peer-1','claim',f.taskInput(t));
+  assert.equal(t.lease.expiresAt-f.now,15*60_000);
+  f.now+=4*60_000;
+  t=f.call('peer-1','start',{...f.taskInput(t),leaseID:t.lease.id},{admit:()=>true});
+  f.now+=4*60_000;
+  t=f.call('peer-1','renew',{...f.taskInput(t),leaseID:t.lease.id});
+  f.now=t.lease.expiresAt;
+  assert.throws(()=>f.call('peer-1','renew',{...f.taskInput(t),leaseID:t.lease.id}),/LEASE_INVALID/);
+  assert.throws(()=>f.call('peer-2','reconcile',f.taskInput(t)),/STOP_NOT_PROVEN/);
+  t=f.call('peer-2','reconcile',f.taskInput(t),{stopped:()=>true});
+  t=f.call('peer-1','claim',f.taskInput(t));
+  f.now=t.lease.expiresAt;
+  assert.throws(()=>f.call('peer-1','start',{...f.taskInput(t),leaseID:t.lease.id},{admit:()=>true}),/LEASE_INVALID/);
+  assert.equal(f.call('peer-2','reconcile',f.taskInput(t)).status,'READY');
+});
 
 test('failed scoped attempt reconciles early only for assignee with verified stop',()=>{
   const f=fixture();let t=f.propose();f.close();t=f.call('peer-1','ready',f.taskInput(t));
@@ -212,4 +231,83 @@ test('separate processes contend for one durable claim; exactly one ownership ge
     assert.equal(results.filter(r=>r.status===2).length,7,JSON.stringify(results));
     assert.equal(c.read().tasks[0].ownershipGeneration,1);assert.equal(c.read().tasks[0].assignee,'peer-1');
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test('Step 1-4: 4 independent tasks distribute across all 4 peers; QA defects validate scope, route rework to file owner, enforce ceiling, and block forbidden broker targets',()=>{
+  const f=fixture();
+  const tasks=['src/a.js','src/b.js','src/c.js','src/d.js'].map((file,i)=>f.propose({text:`Task ${i+1}`,files:[file]}));
+  const qa=f.propose({text:'Task QA (peer-4)',files:['tests/qa.js'],dependencies:tasks.map(t=>t.id)});
+  f.close();
+  const claimed=[];
+  for(let i=0;i<4;i++){
+    let t=f.call('peer-1','ready',f.taskInput(tasks[i]));
+    const winner=claimant(f.state,t).id;
+    t=f.call(winner,'claim',f.taskInput(t));
+    claimed.push(t);
+  }
+  assert.deepEqual(claimed.map(t=>t.assignee),['peer-1','peer-2','peer-3','peer-4']);
+  for(const t0 of claimed){
+    let t=f.call(t0.assignee,'start',{...f.taskInput(t0),leaseID:t0.lease.id},{admit:()=>true});
+    f.state.artifacts??=[];
+    f.state.artifacts.push({id:`rep_${t.id}`,taskID:t.id,owner:t.assignee,sessionID:f.state.members.find(m=>m.id===t.assignee).sessionID,projectID:'project',teamID:'team',status:'completed',planVersion:1,ownershipGeneration:t.ownershipGeneration,workRevision:t.workRevision,checks:[{command:'node check.mjs',exitCode:0}]});
+    t=f.call(t.assignee,'submit',{...f.taskInput(t),leaseID:t.lease.id,reportID:`rep_${t.id}`},{stopped:()=>true,verifyReport:()=>true});
+    f.state.artifacts.push({id:`rev_${t.id}`,taskID:t.id,owner:t.reviewer,sessionID:f.state.members.find(m=>m.id===t.reviewer).sessionID,projectID:'project',teamID:'team',status:'completed',planVersion:1,ownershipGeneration:t.ownershipGeneration,workRevision:t.workRevision,checks:[{command:'node check.mjs',exitCode:0}]});
+    t=f.call(t.reviewer,'review',{...f.taskInput(t),approved:true,reportID:`rev_${t.id}`},{verifyReport:()=>true});
+    t=f.call(t.reviewer,'integrate',f.taskInput(t),{verifyReport:()=>true});
+    t=f.call(t.reviewer,'done',f.taskInput(t),{verifyReport:()=>true});
+  }
+  let q=f.call('peer-4','ready',f.taskInput(qa));
+  assert.equal(claimant(f.state,q).id,'peer-4');
+  q=f.call('peer-4','claim',f.taskInput(q));
+  q=f.call('peer-4','start',{...f.taskInput(q),leaseID:q.lease.id},{admit:()=>true});
+  const member4=f.state.members.find(m=>m.id==='peer-4');
+  assert.throws(()=>reportBody({taskID:q.id,text:'QA',files:['tests/qa.js'],commands:[{command:'node check.mjs',exitCode:1,output:'fail'}],diff:'diff',remaining:'bug',status:'blocked',defects:[{check:'node check.mjs',evidence:'fail',file:'src/unknown.js'}]},f.state,member4),/REPORT_DEFECT_FILE_OUT_OF_DONE_SCOPE/);
+  assert.throws(()=>reportBody({taskID:q.id,text:'QA',files:['tests/qa.js'],commands:[{command:'node check.mjs',exitCode:0,output:'ok'}],diff:'diff',remaining:'bug',status:'completed',defects:[{check:'node check.mjs',evidence:'fail',file:'src/b.js'}]},f.state,member4),/REPORT_FAILED_CHECKS/);
+  const rep=reportBody({taskID:q.id,text:'QA found bug in peer-2 file',files:['tests/qa.js'],commands:[{command:'node check.mjs',exitCode:1,output:'AssertionError'}],diff:'diff',remaining:'src/b.js broken',status:'blocked',defects:[{check:'node check.mjs',evidence:'AssertionError in b',file:'src/b.js'}]},f.state,member4);
+  const routing=routeDefects(f.state,f.state.tasks.find(t=>t.id===q.id),rep.defects,rep.id,1000,5);
+  assert.equal(routing.routed.length,1);
+  assert.equal(routing.routed[0].assignee,'peer-2');
+  const taskB=f.state.tasks.find(t=>t.id===claimed[1].id);
+  assert.equal(taskB.status,'REWORK');
+  assert.equal(taskB.workRevision,2);
+  assert.equal(f.state.tasks.find(t=>t.id===q.id).status,'READY');
+  assert.throws(()=>runQaBrokeredCommand('/tmp','agent-desktop click @e1 --app ai.opencode'),/PEER_QA_BROKER_FORBIDDEN_TARGET/);
+  assert.throws(()=>runQaBrokeredCommand('/tmp','agent-desktop snapshot --app owner-authority.sock'),/PEER_QA_BROKER_FORBIDDEN_TARGET/);
+  assert.throws(()=>runQaBrokeredCommand('/tmp','agent-desktop click @e1'),/PEER_QA_BROKER_APP_REQUIRED/);
+});
+
+test('routeDefects escalates ambiguous file ownership and blocks at maxAttemptsPerTask',()=>{
+  const mk=(id,assignee,files,extra={})=>({id,protocolVersion:1,planID:'p',planVersion:1,status:'DONE',assignee,files,dependencies:[],workRevision:1,taskVersion:1,...extra});
+  const qa=()=>mk('qa','peer-4',['tests/qa.js'],{status:'RUNNING'});
+  const defect=[{check:'node check.mjs',evidence:'fail',file:'src/shared.js'}];
+
+  let state={tasks:[mk('a','peer-1',['src/shared.js']),mk('b','peer-2',['src']),qa()],messages:[],executions:[]};
+  let r=routeDefects(state,state.tasks[2],defect,'rep1',1000,5);
+  assert.equal(r.ambiguous.length,1);
+  assert.deepEqual(r.ambiguous[0].tasks,['a','b']);
+  assert.equal(r.routed.length,0);
+  assert.equal(state.tasks[2].status,'BLOCKED');
+  assert.equal(state.tasks[0].status,'DONE');
+  assert.equal(state.messages.at(-1).action,'defect_escalation');
+  assert.equal(state.messages.at(-1).to,'owner');
+
+  state={tasks:[mk('a','peer-1',['src/shared.js'],{workRevision:5}),qa()],messages:[],executions:[]};
+  r=routeDefects(state,state.tasks[1],defect,'rep2',1000,5);
+  assert.deepEqual(r.exhausted.map(e=>e.taskID),['a']);
+  assert.equal(state.tasks[0].status,'BLOCKED');
+  assert.equal(state.tasks[0].workRevision,5);
+  assert.equal(state.tasks[1].status,'BLOCKED');
+  assert.equal(state.messages.at(-1).action,'defect_exhausted');
+
+  state={tasks:[mk('a','peer-1',['src/shared.js']),qa()],messages:[],executions:Array.from({length:5},()=>({taskID:'a',scope:'worktree'}))};
+  r=routeDefects(state,state.tasks[1],defect,'rep3',1000,5);
+  assert.equal(r.exhausted.length,1);
+  assert.equal(state.tasks[0].status,'BLOCKED');
+
+  state={tasks:[mk('a','peer-1',['src/shared.js'],{workRevision:4}),qa()],messages:[],executions:[]};
+  r=routeDefects(state,state.tasks[1],defect,'rep4',1000,5);
+  assert.equal(r.routed[0].workRevision,5);
+  assert.equal(state.tasks[0].status,'REWORK');
+  assert.equal(state.tasks[1].status,'READY');
+  assert.deepEqual(state.tasks[1].dependencies,['a']);
 });

@@ -40,7 +40,7 @@ export function PilotPane(){
   const [task,setTask]=createSignal(''),[assignee,setAssignee]=createSignal('worker-1')
   const [limit,setLimit]=createSignal(100),[filter,setFilter]=createSignal('')
   const [file,setFile]=createSignal('')
-  const [recipient,setRecipient]=createSignal('team')
+  const [recipient,setRecipient]=createSignal('peer-1')
   const [activeTab,setActiveTab]=createSignal<'chat'|'tasks'|'plan'|'reports'|'activity'>('chat')
   const [selectedPeerID,setSelectedPeerID]=createSignal<string|null>(null)
   const [showOverview,setShowOverview]=createSignal(true)
@@ -150,7 +150,7 @@ export function PilotPane(){
     return {todo,doing,review,done:doneList}
   })
 
-  createEffect(()=>{currentKey();sequence++;reportRequest++;setReportLoading(false);setRecipient('team');pendingSend=undefined;setDraft('');setTask('');setTaskPeer('');setTaskReviewer('');setTaskFiles('');setTaskCriteria('');setTaskChecks('');setTaskDeps([]);pendingTask=undefined;setFile('');setPlanBody('');setPlanCriteria('');setScopeRef('');pendingPlan=undefined;setFilter('');setLimit(100);setNotice('');setError('');setReport(undefined);setSelectedPeerID(null);previousMessages=[];setUnread(0);setAtBottom(true);queueMicrotask(()=>void refresh())})
+  createEffect(()=>{currentKey();sequence++;reportRequest++;setReportLoading(false);setRecipient('peer-1');pendingSend=undefined;setDraft('');setTask('');setTaskPeer('');setTaskReviewer('');setTaskFiles('');setTaskCriteria('');setTaskChecks('');setTaskDeps([]);pendingTask=undefined;setFile('');setPlanBody('');setPlanCriteria('');setScopeRef('');pendingPlan=undefined;setFilter('');setLimit(100);setNotice('');setError('');setReport(undefined);setSelectedPeerID(null);previousMessages=[];setUnread(0);setAtBottom(true);queueMicrotask(()=>void refresh())})
   async function refresh(){
     if(busy||disposed)return
     const current=ctx.sessions.current(),request=++sequence

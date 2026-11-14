@@ -9,8 +9,8 @@ import {DEFAULT_MODELS,sameModel} from './model-routing.mjs';
 import {publicModels} from './pilot-models.mjs';
 import {reportBody,writeReport,readReport} from './pilot-reports.mjs';
 import {peerPlan,planHash,memberID} from './peer-team.mjs';
-import {ingestPlan,protocolAction,protocolFields} from './peer-protocol.mjs';
-import {queueMessages} from './peer-delivery.mjs';
+import {ingestPlan,protocolAction,protocolFields,routeDefects} from './peer-protocol.mjs';
+import {queueMessages,queueTaskHandoffs} from './peer-delivery.mjs';
 import {denyLiveAdmission} from './peer-security.mjs';
 import {inbox,acknowledge} from './peer-delivery.mjs';
 import {reviewPlan} from './peer-approvals.mjs';
@@ -92,13 +92,44 @@ function browserCheckMounts(){
   return ['--ro-bind',join(dependencies,'playwright'),'/opt/peer-runtime/playwright','--ro-bind',join(dependencies,'playwright-core'),'/opt/peer-runtime/playwright-core','--ro-bind',browsers,'/opt/peer-browsers','--ro-bind',fileURLToPath(new URL('./peer-browser-check.mjs',import.meta.url)),'/opt/peer-browser-check.mjs'];
 }
 
+export const QA_FORBIDDEN_PATTERNS=/ai\.opencode|owner-authority|owner_authority|Owner Integration Authority|\.ssh|\.gnupg|\.aws|id_rsa|id_ed25519|credentials|\.env/i;
+
+export function runQaBrokeredCommand(cwd,check){
+  if(QA_FORBIDDEN_PATTERNS.test(check))throw Error('PEER_QA_BROKER_FORBIDDEN_TARGET');
+  if(/^agent-desktop\s+/.test(check)){
+    const args=check.trim().split(/\s+/).slice(1);
+    if(!args.length||args.some(a=>QA_FORBIDDEN_PATTERNS.test(a)))throw Error('PEER_QA_BROKER_FORBIDDEN_TARGET');
+    const appIdx=args.indexOf('--app');
+    if(appIdx!==-1&&QA_FORBIDDEN_PATTERNS.test(args[appIdx+1]??''))throw Error('PEER_QA_BROKER_FORBIDDEN_TARGET');
+    if(['snapshot','click','type','press','focus','get','find','close-app','launch'].includes(args[0])&&(appIdx===-1||!args[appIdx+1]))throw Error('PEER_QA_BROKER_APP_REQUIRED');
+    const out=execFileSync('agent-desktop',args,{cwd,encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
+    if(args[0]==='windows'||args[0]==='list-windows'){
+      try{
+        const parsed=JSON.parse(out);
+        if(Array.isArray(parsed?.data))parsed.data=parsed.data.filter(w=>!QA_FORBIDDEN_PATTERNS.test(`${w.app_id??''} ${w.app_name??''} ${w.title??''}`));
+        if(Array.isArray(parsed?.data?.windows))parsed.data.windows=parsed.data.windows.filter(w=>!QA_FORBIDDEN_PATTERNS.test(`${w.app_id??''} ${w.app_name??''} ${w.title??''}`));
+        return JSON.stringify(parsed);
+      }catch{}
+    }
+    return out;
+  }
+  if(/^adb\s+/.test(check)){
+    const args=check.trim().split(/\s+/).slice(1);
+    if(!args.length||args.some(a=>QA_FORBIDDEN_PATTERNS.test(a)))throw Error('PEER_QA_BROKER_FORBIDDEN_TARGET');
+    return execFileSync('adb',args,{cwd,encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});
+  }
+  throw Error('PEER_WORKTREE_CHECK_FORBIDDEN');
+}
+
 export async function runRequiredChecks(cwd,checks,forbiddenPaths=[]){
   const commands=[];
   for(const check of checks){
+    if(QA_FORBIDDEN_PATTERNS.test(check))throw Error('PEER_QA_BROKER_FORBIDDEN_TARGET');
     const browserCheck=['browser smoke: CRUD/filter/comment/reload/import/export','browser smoke','browser e2e','keyboard-only check','viewport 375px check','README commands verified','mobile 375px','keyboard-only'].includes(check);
-    if(!browserCheck&&!/^node --test(?:\s+[A-Za-z0-9_./-]+)*$/.test(check))throw Error('PEER_WORKTREE_CHECK_FORBIDDEN');
-    if(!browserCheck)for(const path of check.split(/\s+/).slice(2))await assertScopedPath(cwd,path);
-    const output=runInBwrapSandbox(cwd,browserCheck?['/opt/peer-browser-check.mjs',check]:check.split(/\s+/).slice(1),{timeout:browserCheck?60000:15000,forbiddenPaths,browserCheck});
+    const qaBrokerCheck=/^(agent-desktop|adb)\s+/.test(check);
+    if(!browserCheck&&!qaBrokerCheck&&!/^node --test(?:\s+[A-Za-z0-9_./-]+)*$/.test(check))throw Error('PEER_WORKTREE_CHECK_FORBIDDEN');
+    if(!browserCheck&&!qaBrokerCheck)for(const path of check.split(/\s+/).slice(2))await assertScopedPath(cwd,path);
+    const output=qaBrokerCheck?runQaBrokeredCommand(cwd,check):runInBwrapSandbox(cwd,browserCheck?['/opt/peer-browser-check.mjs',check]:check.split(/\s+/).slice(1),{timeout:browserCheck?60000:15000,forbiddenPaths,browserCheck});
     commands.push({command:check,exitCode:0,output:output.slice(0,4000)});
   }
   return commands;
@@ -628,10 +659,7 @@ export class OfficialCoordinator {
         const row=state.executions?.findLast(e=>e.taskID===result.id&&e.scope==='worktree'&&e.state==='admitted-by-adapter');
         if(row){const task=state.tasks.find(t=>t.id===result.id);task.lease.expiresAt=Math.max(task.lease.expiresAt,row.deadline);result.lease.expiresAt=task.lease.expiresAt;}
       }
-      if(['submit','review','done','reassign_review'].includes(action)){
-        const key=`handoff:${result.id}:${result.taskVersion}`;state.messages??=[];
-        if(!state.messages.some(message=>message.requestID===key))state.messages.push({id:randomUUID(),requestID:key,from:memberID(m),to:action==='submit'||action==='reassign_review'?result.reviewer:action==='review'&&result.status==='REWORK'?result.assignee:'team',action:'handoff',text:`Task event ${action}: ${result.id}, status ${result.status}. Read team_protocol before acting; preserve independent review and execution authorization.`,taskID:result.id,at:new Date().toISOString()});
-      }
+      if(['submit','review','done','reassign_review'].includes(action))queueTaskHandoffs(state,memberID(m),action,result);
       return {value:result};
     });
     if(action==='read'){
@@ -679,7 +707,7 @@ export class OfficialCoordinator {
     verifyHostOwnerPolicy(state,policy);
     const task=state.tasks.find(t=>t.id===input?.taskID&&t.planID===plan.planID&&t.planVersion===plan.version);
     if(!task)throw Error('PEER_WORKTREE_TASK_NOT_FOUND');
-    const git=(cwd,...args)=>execFileSync('git',['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','core.fsmonitor=false','-c','protocol.file.allow=never','-c',`user.name=${memberID(member)}`,'-c',`user.email=${memberID(member)}@localhost`,'-C',cwd,...args],{env:gitEnv(),encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+    const git=(cwd,...args)=>execFileSync('git',['-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','-c','core.fsmonitor=false','-c','protocol.file.allow=never','-c',`user.name=${memberID(member)}`,'-c',`user.email=${memberID(member)}@localhost`,'-C',cwd,...args],{env:gitEnv(),encoding:'utf8',stdio:['ignore','pipe','pipe']}).trimEnd();
     const runChecks=cwd=>runRequiredChecks(cwd,task.requiredChecks,[this.directory,this.root]);
     if(input?.mode==='apply'){
       if(task.assignee!==memberID(member)||task.status!=='RUNNING'||task.executionState!=='outstanding'||!task.lease||task.lease.expiresAt<=Date.now())throw Error('PEER_WORKTREE_TASK_NOT_RUNNING');
@@ -749,18 +777,28 @@ export class OfficialCoordinator {
     if(peer&&['ack','claim','review'].includes(action)&&this.read().tasks.some(t=>t.id===input?.taskID&&t.protocolVersion))throw Error('PROTOCOL_VERSIONED_ACTION_REQUIRED');
     if(peer&&action==='assign'&&this.read().plans?.length)throw Error('PROTOCOL_VERSIONED_ACTION_REQUIRED');
     if(action==='report'){
-      if(!input||Object.keys(input).some(k=>!['taskID','text','files','commands','diff','remaining','status'].includes(k)))throw Error('INVALID_PILOT_INPUT');
-      return this.mutate(state=>{
+      if(!input||Object.keys(input).some(k=>!['taskID','text','files','commands','diff','remaining','status','defects'].includes(k)))throw Error('INVALID_PILOT_INPUT');
+      const result=this.mutate(state=>{
         if(state.status!=='ready'||state.projectID!==this.ctx.location.project.id||!state.members.some(m=>m.sessionID===member.sessionID&&m.role===member.role&&m.directory===member.directory))throw Error('PILOT_NOT_READY');
         const report=reportBody(input,state,member);
         state.artifacts??=[];
         if(state.artifacts.some(a=>a.id===report.id))return {value:state.artifacts.find(a=>a.id===report.id)};
         writeReport(this.directory,report);
         const {content,...metadata}=report;metadata.at=new Date().toISOString();
+        if(peer&&metadata.defects?.length){
+          const qaTask=state.tasks.find(t=>t.id===metadata.taskID);
+          if(qaTask?.protocolVersion){
+            const activeExec=state.executions?.findLast(e=>e.taskID===qaTask.id&&e.scope==='worktree'&&e.state==='admitted-by-adapter');
+            if(activeExec){activeExec.state='stop-verified';activeExec.stopReceipt={executionID:activeExec.id,identity:structuredClone(activeExec.identity),receiptID:`qa-defects:${report.id}`,scope:'worktree',outcome:'defects-routed',sandbox:'bwrap-v1',at:Date.now()};}
+            metadata.defectRouting=routeDefects(state,qaTask,metadata.defects,report.id,Date.now(),state.executionPolicy?.maxAttemptsPerTask??5);
+          }
+        }
         state.artifacts.push(metadata);
-         state.messages.push({id:report.id,from:memberID(member),to:peer?'team':member.role==='admin'?'owner':'admin',text:`Báo cáo: ${report.name}`,taskID:report.taskID,artifactID:report.id,action:'report',at:metadata.at});
+        state.messages.push({id:report.id,from:memberID(member),to:peer?'team':member.role==='admin'?'owner':'admin',text:`Báo cáo: ${report.name}`,taskID:report.taskID,artifactID:report.id,action:'report',at:metadata.at});
         return {value:metadata};
       });
+      if(peer&&result.defectRouting?.routed?.length)await this.dispatchMessages();
+      return result;
     }
     if(!input||typeof input!=='object'||Object.keys(input).some(k=>!['recipient','text','requestID','taskID','status'].includes(k)))throw Error('INVALID_PILOT_INPUT');
     if(action==='inbox'||action==='status'){
@@ -846,7 +884,7 @@ export async function registerOfficialCoordinator(ctx){
       }});
     }
     editor.add({name:'report',description:'Create real Markdown task report in managed storage and share attachment. Agent-provided evidence only; does not complete task or wake models.',options:{namespace:'team',codemode:false},
-      input:{type:'object',properties:{taskID:{type:'string'},text:{type:'string',maxLength:200000},files:{type:'array',items:{type:'string'}},commands:{type:'array',items:{type:'object',properties:{command:{type:'string'},exitCode:{type:'integer'},output:{type:'string'}},required:['command','exitCode','output'],additionalProperties:false}},diff:{type:'string'},remaining:{type:'string'},status:{type:'string',enum:['completed','blocked']}},required:['taskID','text','files','commands','diff','remaining','status'],additionalProperties:false},
+      input:{type:'object',properties:{taskID:{type:'string'},text:{type:'string',maxLength:200000},files:{type:'array',items:{type:'string'}},commands:{type:'array',items:{type:'object',properties:{command:{type:'string'},exitCode:{type:'integer'},output:{type:'string'}},required:['command','exitCode','output'],additionalProperties:false}},diff:{type:'string'},remaining:{type:'string'},status:{type:'string',enum:['completed','blocked']},defects:{type:'array',items:{type:'object',properties:{check:{type:'string'},evidence:{type:'string'},file:{type:'string'}},required:['check','evidence','file'],additionalProperties:false}}},required:['taskID','text','files','commands','diff','remaining','status'],additionalProperties:false},
       execute:async(input,context)=>({content:JSON.stringify(await retryBusy(()=>coordinator.execute('report',input,context)))})});
     editor.add({name:'read_report',description:'Read team Markdown report by artifact ID. Does not read arbitrary paths.',options:{namespace:'team',codemode:false},input:{type:'object',properties:{id:{type:'string'}},required:['id'],additionalProperties:false},execute:async(input,context)=>{await coordinator.caller(context);return {content:JSON.stringify(readReport(coordinator.directory,coordinator.read(),ctx.location.project.id,input.id))};}});
     editor.add({name:'receipt',description:'Acknowledge a durable inbox message as this native peer. Not provider admission or execution.',options:{namespace:'team',codemode:false},input:{type:'object',properties:{messageID:{type:'string'},requestID:{type:'string'}},required:['messageID','requestID'],additionalProperties:false},execute:async(input,context)=>({content:JSON.stringify(await retryBusy(()=>coordinator.execute('receipt',input,context)))})});

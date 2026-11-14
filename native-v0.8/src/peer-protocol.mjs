@@ -5,7 +5,8 @@ import {executionIdentity} from './peer-native.mjs';
 export const PROTOCOL_VERSION=1;
 export const DISCUSSION_ROUNDS=3;
 export const ROUND_MS=30_000;
-export const LEASE_MS=60_000;
+// Allow slow native model turns; expiry still requires verified stop before recovery.
+export const LEASE_MS=15*60_000;
 const digest=value=>createHash('sha256').update(value).digest('hex');
 const fail=code=>{throw Error(code);};
 function object(value,keys){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(k=>!keys.includes(k)))fail('PROTOCOL_INPUT_INVALID');}
@@ -66,9 +67,11 @@ function taskFor(state,input){
 function dependencies(state,t){return t.dependencies.every(d=>protocolTasks(state).some(x=>x.id===d&&x.planID===t.planID&&x.planVersion===t.planVersion&&x.status==='DONE'));}
 function eligible(m,t){return t.requiredCapabilities.every(c=>(m.capabilities??['collaboration']).includes(c));}
 export function claimant(state,t){
-  const candidates=state.members.filter(m=>eligible(m,t)&&id(m)!==t.reviewPeer&&(t.assignedPeer?id(m)===t.assignedPeer:!t.bids.length||t.bids.includes(id(m))));
-  const load=m=>protocolTasks(state).filter(t=>t.assignee===id(m)&&active(t)).length;
-  return candidates.sort((a,b)=>load(a)-load(b)||(id(a)<id(b)?-1:id(a)>id(b)?1:0))[0];
+  const target=t.assignedPeer??t.text?.match(/\((peer-\d+)\)/)?.[1];
+  const candidates=state.members.filter(m=>eligible(m,t)&&id(m)!==t.reviewPeer&&(target?id(m)===target:!t.bids.length||t.bids.includes(id(m))));
+  const load=m=>protocolTasks(state).filter(x=>x.assignee===id(m)&&active(x)).length;
+  const done=m=>t.dependencies?.length?0:protocolTasks(state).filter(x=>x.assignee===id(m)&&x.status==='DONE').length;
+  return candidates.sort((a,b)=>load(a)-load(b)||done(a)-done(b)||(id(a)<id(b)?-1:id(a)>id(b)?1:0))[0];
 }
 function reviewer(state,primary){
   const load=m=>protocolTasks(state).filter(t=>t.reviewer===id(m)&&active(t)).length;
@@ -98,6 +101,46 @@ export function ownerSummary(state){
       return {id:t.id,status:t.status,assignee:t.assignee,reviewer:t.reviewer,ownershipGeneration:t.ownershipGeneration,workRevision:t.workRevision,executionState:t.executionState,submission:t.submission??null,reviewReportID:t.review?.reportID??null,integrationReceiptID:integration?.id??null,resultCommit:integration?.resultCommit??null};
     })
   };
+}
+
+export function routeDefects(state,qaTask,defects,reportID,now=Date.now(),maxAttempts=5){
+  if(!Array.isArray(defects)||!defects.length)return {routed:[],ambiguous:[],exhausted:[]};
+  const planTasks=protocolTasks(state).filter(t=>t.planID===qaTask.planID&&t.planVersion===qaTask.planVersion&&t.id!==qaTask.id);
+  const routed=[],ambiguous=[],exhausted=[],byTask=new Map();
+  for(const d of defects){
+    const matches=planTasks.filter(t=>t.status==='DONE'&&t.files?.some(tf=>d.file===tf||d.file.startsWith(tf+'/')));
+    if(matches.length>1){ambiguous.push({defect:d,tasks:matches.map(t=>t.id)});continue;}
+    const target=matches[0]??planTasks.find(t=>t.files?.some(tf=>d.file===tf||d.file.startsWith(tf+'/')));
+    if(!target)fail('PROTOCOL_DEFECT_UNMAPPED');
+    if(!byTask.has(target.id))byTask.set(target.id,{target,defects:[]});
+    byTask.get(target.id).defects.push(d);
+  }
+  if(ambiguous.length){
+    qaTask.status='BLOCKED';qaTask.reason=`Ambiguous defect file ownership: ${ambiguous.map(a=>a.defect.file).join(', ')}`;qaTask.taskVersion++;
+    state.messages.push({id:randomUUID(),from:qaTask.assignee,to:'owner',action:'defect_escalation',taskID:qaTask.id,artifactID:reportID,text:`Defect routing requires Owner decision: ${JSON.stringify(ambiguous)}`,at:new Date(now).toISOString()});
+    return {routed,ambiguous,exhausted};
+  }
+  for(const {target,defects:list} of byTask.values()){
+    const attempts=(state.executions??[]).filter(e=>e.taskID===target.id&&e.scope==='worktree').length;
+    if(attempts>=maxAttempts||target.workRevision>=maxAttempts){
+      target.status='BLOCKED';target.reason=`Max rework attempts (${maxAttempts}) reached`;target.taskVersion++;
+      exhausted.push({taskID:target.id,assignee:target.assignee,attempts:Math.max(attempts,target.workRevision)});
+      state.messages.push({id:randomUUID(),from:qaTask.assignee,to:'owner',action:'defect_exhausted',taskID:target.id,artifactID:reportID,text:`Task ${target.id} (${target.assignee}) exhausted maxAttemptsPerTask=${maxAttempts}.`,at:new Date(now).toISOString()});
+      continue;
+    }
+    target.status='REWORK';target.workRevision++;target.review=null;target.submission=null;target.executionState='not-started';
+    target.lease={id:`lease_${randomUUID()}`,expiresAt:now+LEASE_MS};target.taskVersion++;
+    target.defects=structuredClone(list);
+    if(!qaTask.dependencies.includes(target.id))qaTask.dependencies.push(target.id);
+    routed.push({taskID:target.id,assignee:target.assignee,workRevision:target.workRevision,files:list.map(d=>d.file)});
+    state.messages.push({id:randomUUID(),requestID:`defect:${reportID}:${target.id}:${target.workRevision}`,from:qaTask.assignee,to:target.assignee,action:'handoff',taskID:target.id,artifactID:reportID,text:`QA routed ${list.length} defect(s) on ${list.map(d=>d.file).join(', ')} to ${target.assignee} (task ${target.id}, workRevision ${target.workRevision}): ${list.map(d=>`[${d.check}] ${d.evidence}`).join('; ')}`,at:new Date(now).toISOString()});
+  }
+  if(routed.length&&!exhausted.length){
+    qaTask.status='READY';qaTask.executionState='not-started';qaTask.workRevision++;qaTask.submission=null;qaTask.review=null;qaTask.lease=null;qaTask.taskVersion++;
+  }else if(exhausted.length){
+    qaTask.status='BLOCKED';qaTask.reason=`Upstream task exhausted rework ceiling: ${exhausted.map(e=>e.taskID).join(', ')}`;qaTask.taskVersion++;
+  }
+  return {routed,ambiguous,exhausted};
 }
 
 // ponytail: fixed membership, no native dispatch; add membership changes only with trusted revision/recovery.

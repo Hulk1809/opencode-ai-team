@@ -10,12 +10,23 @@ export function reportBody(input,state,member){
   if(!Array.isArray(input.files)||input.files.some(p=>typeof p!=='string'||!p||p.startsWith('/')||p.includes('\\')||p.split('/').some(x=>x==='..'||x==='.')||/[\x00-\x1f]/.test(p)))throw Error('REPORT_FILES_INVALID');
   if(!Array.isArray(input.commands)||!input.commands.length||input.commands.some(c=>typeof c?.command!=='string'||!c.command.trim()||!Number.isInteger(c.exitCode)||typeof c.output!=='string'))throw Error('REPORT_COMMAND_EVIDENCE_REQUIRED');
   if(!['completed','blocked'].includes(input.status)||typeof input.diff!=='string'||!input.diff.trim()||typeof input.remaining!=='string')throw Error('REPORT_EVIDENCE_REQUIRED');
-  if(input.status==='completed'&&input.commands.some(c=>c.exitCode!==0))throw Error('REPORT_FAILED_CHECKS');
-  const content=`# ${member.role} task report\n\nProject: ${state.projectID}\nTeam: ${state.teamID}\nTask: ${task.id}\nStatus: ${input.status}\n\n## Công việc được giao\n${task.text}\n\n## Files đã thay đổi\n${input.files.map(p=>`- ${p}`).join('\n')||'Không có'}\n\n## Cách triển khai\n${input.text}\n\n## Commands/tests và exit codes\n${input.commands.map(c=>`${c.command}\nExit code: ${c.exitCode}\n\n${c.output}`).join('\n\n')}\n\n## Git diff summary\n${input.diff}\n\n## Lỗi còn tồn tại\n${input.remaining||'Không được báo cáo'}\n\nEvidence do agent cung cấp; chưa phải xác minh độc lập của Admin.\n`;
+  let defects;
+  if(input.defects!==undefined){
+    if(!Array.isArray(input.defects)||input.defects.length>64)throw Error('REPORT_DEFECTS_INVALID');
+    const doneTasks=state.tasks.filter(t=>t.protocolVersion&&t.planID===task.planID&&t.planVersion===task.planVersion&&t.status==='DONE'&&t.id!==task.id);
+    defects=input.defects.map(d=>{
+      if(!d||typeof d!=='object'||Array.isArray(d)||Object.keys(d).some(k=>!['check','evidence','file'].includes(k))||typeof d.check!=='string'||!d.check.trim()||typeof d.evidence!=='string'||!d.evidence.trim()||typeof d.file!=='string'||!d.file.trim()||d.file.startsWith('/')||d.file.includes('\\')||d.file.split('/').some(x=>!x||x==='.'||x==='..')||/[\x00-\x1f]/.test(d.file))throw Error('REPORT_DEFECTS_INVALID');
+      if(!doneTasks.some(t=>t.files?.some(tf=>d.file===tf||d.file.startsWith(tf+'/'))))throw Error('REPORT_DEFECT_FILE_OUT_OF_DONE_SCOPE');
+      return {check:d.check.trim(),evidence:d.evidence.trim(),file:d.file.trim()};
+    });
+  }
+  if(input.status==='completed'&&(input.commands.some(c=>c.exitCode!==0)||defects?.length))throw Error('REPORT_FAILED_CHECKS');
+  const defectSection=defects?.length?`\n\n## Structured Defects\n${defects.map(d=>`- [${d.file}] (${d.check}): ${d.evidence}`).join('\n')}`:'';
+  const content=`# ${member.role} task report\n\nProject: ${state.projectID}\nTeam: ${state.teamID}\nTask: ${task.id}\nStatus: ${input.status}\n\n## Công việc được giao\n${task.text}\n\n## Files đã thay đổi\n${input.files.map(p=>`- ${p}`).join('\n')||'Không có'}\n\n## Cách triển khai\n${input.text}\n\n## Commands/tests và exit codes\n${input.commands.map(c=>`${c.command}\nExit code: ${c.exitCode}\n\n${c.output}`).join('\n\n')}\n\n## Git diff summary\n${input.diff}\n\n## Lỗi còn tồn tại\n${input.remaining||'Không được báo cáo'}${defectSection}\n\nEvidence do agent cung cấp; chưa phải xác minh độc lập của Admin.\n`;
   if(Buffer.byteLength(content)>256000)throw Error('REPORT_TOO_LARGE');
   const versionedContent=task.protocolVersion?`${content}\nPlan version: ${task.planVersion}\nOwnership generation: ${task.ownershipGeneration}\nWork revision: ${task.workRevision}\n`:content;
   const id='report_'+createHash('sha256').update(JSON.stringify([state.projectID,state.teamID,task.id,member.sessionID,versionedContent])).digest('hex');
-  return {id,projectID:state.projectID,teamID:state.teamID,taskID:task.id,owner:member.role,sessionID:member.sessionID,name:`${member.role}-task-${id.slice(7,19)}.md`,storageRef:`${id}.md`,content:versionedContent,status:input.status,...(task.protocolVersion?{planVersion:task.planVersion,ownershipGeneration:task.ownershipGeneration,workRevision:task.workRevision,checks:input.commands.map(c=>({command:c.command,exitCode:c.exitCode}))}:{})};
+  return {id,projectID:state.projectID,teamID:state.teamID,taskID:task.id,owner:member.role,sessionID:member.sessionID,name:`${member.role}-task-${id.slice(7,19)}.md`,storageRef:`${id}.md`,content:versionedContent,status:input.status,...(defects?{defects}:{}),...(task.protocolVersion?{planVersion:task.planVersion,ownershipGeneration:task.ownershipGeneration,workRevision:task.workRevision,checks:input.commands.map(c=>({command:c.command,exitCode:c.exitCode}))}:{})};
 }
 function reportDirectory(directory){
   const path=join(directory,'reports');mkdirSync(path,{recursive:true,mode:0o700});

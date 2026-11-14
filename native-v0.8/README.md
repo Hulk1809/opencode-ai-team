@@ -4,18 +4,20 @@ Plugin điều phối đội ngũ AI đa tác tử (4-Peer Git Worktree Collabor
 
 ---
 
-## Trạng thái mã nguồn — 2026-11-12
+## Trạng thái mã nguồn — 2026-11-15
 
-**Bản phát triển, chưa hoàn tất kiểm chứng toàn luồng.** Plugin local đã cập nhật; A và C đã `DONE` qua review độc lập và tích hợp canonical. Bộ kiểm thử plugin gần nhất: **282/282 đạt**, build đạt.
+**Bản phát triển đã kiểm chứng hai workflow Desktop thật:** Peer-1 đọc plan và tự phân việc; QA báo structured defect, route rework đúng chủ file rồi chạy lại. Cả hai project test đạt **4/4 DONE**, có review độc lập và tích hợp canonical. Bộ kiểm thử plugin: **290/290 đạt**, build đạt. Các lượt chạy có can thiệp khôi phục/sửa blocker; chưa chứng minh tự phục hồi hoàn toàn.
 
 [Tổng quan repository](../README.md) · [Biên bản kiểm chứng](docs/README.md)
 
 - Model recovery: Peer idle đổi ngay dù task outstanding; session API/composer đồng bộ đã kiểm chứng trên Desktop và qua reload. Phiên đang trả lời vẫn queue; chưa có ngắt để đổi ngay, chưa kiểm quota provider thật.
 
 - Đã sửa: xác minh grant trước khi UI báo quyền, giữ budget khi ký lại, chọn người nhận Owner, delivery tới 4 Peer, phục hồi attempt thất bại có stop proof, chạy browser/keyboard/375px trong sandbox và thông báo report thiếu required checks.
-- Còn: B cũ thiếu stop proof; B/I/R chưa hoàn tất; lifecycle verify-only cho `files=[]`, E2E cuối/ảnh bằng chứng và kiểm chứng live revoke/reload/refresh/rework chưa đủ.
+- Đợt này: handoff đúng reviewer/assignee, claimant phân tải công bằng, structured defects và rework ceiling, re-integration, lease 15 phút, sửa nhãn thiếu policy và parser Git porcelain giữ khoảng trắng đầu. Không receipt-gated backpressure; vẫn giữ Owner approval và xác minh chữ ký.
+- Còn: tự phục hồi session bị ngắt chưa được kiểm chứng; quan sát có peer gửi nhắc trùng. Không suy diễn thành lỗi queue hay tự động retry.
 - `maxCalls` đếm số lần `start` execution, không giới hạn chat. Không coi delivery `sent` hay unit tests là bằng chứng toàn workflow hoàn tất.
 - Bằng chứng chi tiết: [Desktop recovery](docs/recovery-live-2026-11-12.md), [browser runner](docs/browser-runner-live-2026-11-11.md), [integration](docs/integration-live-2026-11-11.md).
+- Acceptance mới: [Peer-1 tự chia plan](docs/qa-directed-plan-live-2026-11-13.md), [structured defect/rework](docs/qa-defect-rework-live-2026-11-15.md), [lượt Desktop trước và điều chỉnh routing](docs/qa-desktop-live-2026-11-13.md).
 
 ## 1. Phân tích Kiến trúc & Mã nguồn (`src/`)
 

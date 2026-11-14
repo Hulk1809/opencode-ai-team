@@ -177,6 +177,7 @@ export function startHostOwnerBridge(dirOrOpts,opts={}){
 }
 
 export function executionAuthorization(state,verifyPolicy=verifyHostOwnerPolicy){
+  if(!state?.executionPolicy)return {authorized:false,reason:'PEER_WORKTREE_POLICY_REQUIRED'};
   try{
     verifyPolicy(state);
     const policy=state.executionPolicy,plan=state.plans?.at(-1);

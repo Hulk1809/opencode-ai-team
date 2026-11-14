@@ -5,6 +5,10 @@ import {executionAuthorization} from '../src/host-owner-bridge.mjs';
 test('execution status requires verified signature and current approved plan',()=>{
   const state={executionPolicy:{planID:'p',planVersion:1,digest:'d'},plans:[{planID:'p',version:1,digest:'d',ownerDecision:'approve'}]};
   const verify=()=>true;
+  for(const state of [undefined,{}, {executionPolicy:null}]){
+    assert.deepEqual(executionAuthorization(state),{authorized:false,reason:'PEER_WORKTREE_POLICY_REQUIRED'});
+    assert.deepEqual(executionAuthorization(state,()=>{assert.fail('missing policy must not reach signature verification')}),{authorized:false,reason:'PEER_WORKTREE_POLICY_REQUIRED'});
+  }
   assert.equal(executionAuthorization(state,verify).authorized,true);
   assert.deepEqual(executionAuthorization(state,()=>{throw Error('PEER_NATIVE_POLICY_SIGNATURE_INVALID')}),{authorized:false,reason:'PEER_NATIVE_POLICY_SIGNATURE_INVALID'});
   for(const change of [{revokedAt:1},{planVersion:2},{digest:'other'}]){

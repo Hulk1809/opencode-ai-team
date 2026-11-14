@@ -63,7 +63,7 @@ export async function integrateReviewedTask(coordinator,input,authority){
   const receiptID=`integration_${randomUUID()}`;
   coordinator.mutate(current=>{
     reports(coordinator,current,fresh(current,input));current.integrations??=[];
-    if(current.integrations.some(r=>r.requestID===input.requestID||r.input.directory===input.directory||(r.taskID===input.taskID&&(['preparing','uncertain','merged'].includes(r.state)||(r.input.ownershipGeneration===input.ownershipGeneration&&r.input.workRevision===input.workRevision)))))throw Error('PEER_INTEGRATION_ALREADY_RESERVED');
+    if(current.integrations.some(r=>r.requestID===input.requestID||r.input.directory===input.directory||(r.taskID===input.taskID&&(['preparing','uncertain'].includes(r.state)||(r.input.ownershipGeneration===input.ownershipGeneration&&r.input.workRevision===input.workRevision)))))throw Error('PEER_INTEGRATION_ALREADY_RESERVED');
     current.integrations.push({id:receiptID,requestID:input.requestID,taskID:input.taskID,input:structuredClone(input),reviewReportID:task.review.reportID,submission:task.submission,state:'preparing'});return {};
   });
   let outcome={state:'uncertain'};
