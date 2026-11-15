@@ -43,7 +43,7 @@ export function PilotPane(){
   const [recipient,setRecipient]=createSignal('peer-1')
   const [activeTab,setActiveTab]=createSignal<'chat'|'tasks'|'plan'|'reports'|'activity'>('chat')
   const [selectedPeerID,setSelectedPeerID]=createSignal<string|null>(null)
-  const [showOverview,setShowOverview]=createSignal(true)
+  const [showOverview,setShowOverview]=createSignal(false)
   const [showRouting,setShowRouting]=createSignal(false)
   let pendingSend:{key:string,text:string,recipient:string,requestID:string}|undefined
   const [planSource,setPlanSource]=createSignal('text'),[planBody,setPlanBody]=createSignal(''),[planCriteria,setPlanCriteria]=createSignal(''),[scopeRef,setScopeRef]=createSignal('')
@@ -243,32 +243,34 @@ export function PilotPane(){
           <span class={`b31-pill ${latestPlan()?.ownerDecision==='approve'?'is-approved':latestPlan()?.ownerDecision==='reject'?'is-blocked':'is-pending'}`} title="Trạng thái Shared Plan">
             PLAN v{latestPlan()?.version??0} {latestPlan()?.ownerDecision==='approve'?'APPROVED':(latestPlan()?.ownerDecision??'PENDING').toUpperCase()}
           </span>
-          <span class="b31-pill">{team().members.length} Peers</span>
           <span class="b31-pill" title="Nguồn: session.active() & task graph">
             {runningPeers()} Running · {done()}/{team().tasks.length} Done
-          </span>
-          <button type="button" disabled={sending()||!!rpcError()||latestPlan()?.ownerDecision!=='approve'} onClick={()=>toggleExecution()}>{team()?.executionPolicy&&!team()?.executionPolicy?.revokedAt?'Thu hồi execution':'Cấp quyền execution'}</button>
-          <Show when={team()?.executionPolicy}><button type="button" disabled={sending()||!!rpcError()} onClick={()=>toggleExecution(true)}>Ký lại execution</button></Show>
-          <span class="b31-pill" title="Scoped worktree execution; native edit/shell remain denied">
-             Execution: {!rpcError()&&team()?.executionAuthorization?.authorized===true?'WORKTREE AUTHORIZED':`BLOCKED · ${rpcError()?'Mất kết nối':team()?.executionAuthorization?.reason??'Chưa xác minh quyền'}`}
           </span>
         </Show>
       </div>
       <div class="b31-header-right">
         <span class="pilot-badge" role="status">{connectionLabel({selected:!!ctx.sessions.current(),loading:loading(),error:rpcError(),status:valid()?.team?.status})}</span>
         <Show when={team()}>
-          <button type="button" class="b31-btn-ghost" aria-pressed={showRouting()} onClick={()=>setShowRouting(v=>!v)}>Routing</button>
-          <button type="button" class="b31-btn-ghost" aria-pressed={showOverview()} onClick={()=>setShowOverview(v=>!v)}>Overview</button>
-        </Show>
-        <button type="button" class="b31-btn-ghost" onClick={()=>act(()=>ctx.layout.settings())}>Settings</button>
-        <Show when={team()?.mode==='peer'&&team()?.isolation==='read-only'}><button type="button" class="b31-btn-ghost" disabled={creating()} onClick={handleCreateTeam}>Chuyển sang Git worktree</button></Show>
-        <button type="button" class="b31-btn-ghost" title="Chỉ đọc lại trạng thái; không tạo worktree hoặc gửi prompt" disabled={loading()} onClick={()=>void refresh()}>Làm mới</button>
+           <button type="button" class="b31-btn-ghost" aria-pressed={showOverview()} onClick={()=>setShowOverview(v=>!v)}>Overview</button>
+         </Show>
       </div>
     </header>
 
-    <p class="pilot-safety b31-safety-bar">
-      <span>Chat session: {team()?.collaboration?.enabled?'BẬT':'TẠM DỪNG'} · Quyền thực thi code tách riêng · {team()?.isolation??'worktree + bwrap-v1'} · Gen: {team()?.runtime?.generation??PEER_GENERATION}</span>
-    </p>
+     <details class="b31-owner-controls">
+       <summary>Quản trị & quyền Owner · {!rpcError()&&team()?.executionAuthorization?.authorized===true?'Đã cấp quyền worktree':'Chưa có quyền thực thi đã xác minh'}</summary>
+       <div class="b31-owner-actions">
+         <Show when={team()}>
+           <button type="button" disabled={sending()||!!rpcError()||latestPlan()?.ownerDecision!=='approve'} onClick={()=>toggleExecution()}>{team()?.executionPolicy&&!team()?.executionPolicy?.revokedAt?'Thu hồi execution':'Cấp quyền execution'}</button>
+           <Show when={team()?.executionPolicy}><button type="button" disabled={sending()||!!rpcError()} onClick={()=>toggleExecution(true)}>Ký lại execution</button></Show>
+           <button type="button" aria-pressed={showRouting()} onClick={()=>setShowRouting(v=>!v)}>Routing</button>
+         </Show>
+         <button type="button" onClick={()=>act(()=>ctx.layout.settings())}>Settings</button>
+         <Show when={team()?.mode==='peer'&&team()?.isolation==='read-only'}><button type="button" disabled={creating()} onClick={handleCreateTeam}>Chuyển sang Git worktree</button></Show>
+         <button type="button" title="Chỉ đọc lại trạng thái; không tạo worktree hoặc gửi prompt" disabled={loading()} onClick={()=>void refresh()}>Làm mới</button>
+       </div>
+       <p class="pilot-safety">Chat session: {team()?.collaboration?.enabled?'BẬT':'TẠM DỪNG'} · Quyền thực thi code tách riêng · {team()?.isolation??'worktree + bwrap-v1'} · Gen: {team()?.runtime?.generation??PEER_GENERATION}</p>
+       <p>Execution: {!rpcError()&&team()?.executionAuthorization?.authorized===true?'WORKTREE AUTHORIZED':`BLOCKED · ${rpcError()?'Mất kết nối':team()?.executionAuthorization?.reason??'Chưa xác minh quyền'}`}</p>
+     </details>
 
     <Show when={error()}><div role="alert" class="pilot-error b31-banner-error"><p>{actionError()?'Thao tác thất bại: ':'Đọc trạng thái thất bại: '}{error()}</p><Show when={actionError()}><button type="button" onClick={()=>setError('')}>Đóng lỗi thao tác</button></Show></div></Show>
     <Show when={notice()}><p role="status" class="b31-banner-notice">{notice()}</p></Show>
@@ -299,13 +301,12 @@ export function PilotPane(){
             const current=()=>tasks().find(taskActive)
             const doneCount=()=>tasks().filter(taskDone).length
             const totalCount=()=>tasks().length
-            const sel=()=>m.model?.selection??m.modelPreference?.observed??m.modelDefault
             const isSelected=()=>selectedPeerID()===peerKey()
             const actState=()=>m.activity??'unavailable'
             const curTaskState=()=>current()?taskState(current()):null
             return <article aria-label={`Member ${memberLabel(m)}`} class="b31-peer-card" classList={{'is-selected':isSelected(),'is-running':actState()==='running'}}>
               <div class="b31-peer-card-top">
-                <button type="button" class="b31-peer-identity" aria-label={`Chi tiết ${memberLabel(m)}`} onClick={()=>setSelectedPeerID(isSelected()?null:peerKey())}>
+                 <button type="button" class="b31-peer-identity" aria-label={`Chi tiết ${memberLabel(m)}`} aria-expanded={isSelected()} onClick={()=>setSelectedPeerID(isSelected()?null:peerKey())}>
                   <span class={`b31-peer-avatar peer-color-${(idx()%4)+1}`}>{peerShort(peerKey())}</span>
                   <strong>{memberLabel(m)}</strong>
                 </button>
@@ -320,13 +321,6 @@ export function PilotPane(){
                 </div>
               </div>
 
-              <div class="b31-peer-model-row" onClick={()=>setSelectedPeerID(isSelected()?null:peerKey())} title="Click để mở Model Selector & chi tiết Peer">
-                <span class="b31-model-name pilot-truncate">
-                  {sel()?`${sel().providerID} / ${sel().id??sel().modelID}`:'Chưa ghim model native'}
-                </span>
-                <span class="b31-variant-pill">{sel()?.variant??'default'}</span>
-              </div>
-
               <div class="b31-peer-task-row">
                 <small class="pilot-truncate" title={current()?.text??(totalCount()?`Hoàn tất ${doneCount()}/${totalCount()} tasks`:'Không có task active')}>
                   {current()?current().text.replace(/^\[TEST_FIXTURE\]\s*/,''):totalCount()?`Đã xong ${doneCount()}/${totalCount()} tasks`:'Không có task active'}
@@ -336,9 +330,7 @@ export function PilotPane(){
               <progress max={totalCount()||1} value={doneCount()} aria-label={`Tiến độ ${memberLabel(m)}`}/>
 
               <div class="b31-peer-card-actions">
-                <button type="button" class="b31-peer-mini-btn" aria-label={`Mở session ${m.role}`} onClick={()=>act(()=>{if(!valid())throw Error('Snapshot đã đổi.');ctx.tabs.open({server:valid().serverID,id:m.sessionID},{focus:true})})}>Session ↗</button>
-                <button type="button" class="b31-peer-mini-btn" aria-label={`Nhắc @${m.role}`} onClick={()=>{setActiveTab('chat');setDraft(v=>`${v}${v?' ':''}@${m.role} `)}}>@mention</button>
-                <button type="button" class="b31-peer-mini-btn" aria-expanded={isSelected()} onClick={()=>setSelectedPeerID(isSelected()?null:peerKey())}>Model ▾</button>
+                 <button type="button" class="b31-peer-mini-btn" aria-label={`Chi tiết và model ${memberLabel(m)}`} aria-expanded={isSelected()} onClick={()=>setSelectedPeerID(isSelected()?null:peerKey())}>Chi tiết & model</button>
               </div>
             </article>
           }}</For>
@@ -450,7 +442,7 @@ export function PilotPane(){
               </Show>
               <For each={visible()}>{(m:any,index)=>{
                 const isOwner=()=>m.from==='owner'
-                const grouped=()=>index()>0&&visible()[index()-1]?.from===m.from
+                 const grouped=()=>index()>0&&visible()[index()-1]?.from===m.from&&visible()[index()-1]?.to===m.to
                 const peerIdx=()=>{const n=/^peer-(\d+)$/i.exec(m.from??'');return n?((Number(n[1])-1)%4)+1:1}
                 const att=()=>m.artifactID?team().artifacts?.find((a:any)=>a.id===m.artifactID):null
                 return <article class="pilot-message b31-msg-row" classList={{'pilot-owner':isOwner(),'pilot-grouped':grouped()}}>
@@ -460,7 +452,7 @@ export function PilotPane(){
                   <div class="b31-msg-bubble">
                     <div class="pilot-section-head b31-msg-meta">
                       <strong>{peerDisplay(m.from,team().members)}</strong>
-                      <Show when={m.to&&m.to!=='team'}><span class="b31-recipient-tag">→ {peerDisplay(m.to,team().members)}</span></Show>
+                       <Show when={m.to}><span class="b31-recipient-tag">Đến: {m.to==='team'?'Toàn team':peerDisplay(m.to,team().members)}</span></Show>
                       <time title={m.at}>{messageTime(m.at)}</time>
                     </div>
                     <div class="b31-msg-body"><SafeReport text={m.text}/></div>
@@ -548,13 +540,13 @@ export function PilotPane(){
               </div>
               <div class="pilot-section-head b31-composer-foot">
                 <small>Draft · {draft().length}/10000 ký tự · Enter để gửi, Shift+Enter xuống dòng</small>
-                 <small class="pilot-muted">Chọn người nhận rồi gửi và xác nhận hộp thoại Owner. {team().collaboration?.enabled?'Phối hợp bật: xem delivery; Sent chưa phải xử lý xong.':'Phối hợp tắt: chỉ lưu tin, không gọi AI.'} Tag trong nội dung có thể gửi thêm Peer.</small>
+                   <small class="pilot-muted">Xác nhận Owner trước khi gửi. {team().collaboration?.enabled?'Sent chưa phải xử lý xong.':'Chỉ lưu tin, không gọi AI.'} Tag có thể gửi thêm Peer.</small>
               </div>
             </div>
           </Show>
 
           {/* TAB 2: TASKS BOARD (20% Beads — Compact 4-Column Kanban + Dependencies & Progress) */}
-          <Show when={team()?.deliveries?.length}>
+           <Show when={activeTab()==='activity'&&team()?.deliveries?.length}>
             <details><summary>Trạng thái giao nhận session ({team().deliveries.length})</summary><For each={team().deliveries}>{(d:any)=><p>{peerDisplay(d.memberID,team().members)} · {d.status} · {d.messageID}{d.error?` · ${d.error}`:''}</p>}</For></details>
           </Show>
           <Show when={(activeTab()==='tasks'||activeTab()==='plan')&&latestPlan()}>

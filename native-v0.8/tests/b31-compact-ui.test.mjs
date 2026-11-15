@@ -54,3 +54,16 @@ test('B3.1 UI implements 4-peer strip, Zalo/Messenger chat, tabs, CAS model sele
   assert.match(css,/@container \(max-width:850px\)/);
   assert.match(css,/@container \(max-width:560px\)/);
 });
+
+test('chat-first layout keeps Owner actions gated and overview reachable on narrow panels',()=>{
+  const pane=readFileSync(new URL('../src/pilot-pane.tsx',import.meta.url),'utf8');
+  const css=readFileSync(new URL('../src/pilot-pane.css',import.meta.url),'utf8');
+  assert.match(pane,/\[showOverview,setShowOverview\]=createSignal\(false\)/);
+  assert.match(pane,/<details class="b31-owner-controls">/);
+  assert.match(pane,/disabled=\{sending\(\)\|\|!!rpcError\(\)\|\|latestPlan\(\)\?\.ownerDecision!=='approve'\}/);
+  for(const operation of ['execution','cancelExecution','collaboration'])assert.ok(pane.includes(`operation:'${operation}'`));
+  assert.match(pane,/visible\(\)\[index\(\)-1\]\?\.to===m.to/);
+  assert.match(pane,/activeTab\(\)==='activity'&&team\(\)\?\.deliveries\?\.length/);
+  assert.match(css,/\.pilot-columns\.with-overview\{flex-direction:column/);
+  assert.doesNotMatch(css,/\.pilot-details\{display:none\}/);
+});
